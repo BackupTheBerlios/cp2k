@@ -201,7 +201,7 @@ contains
     real(wp), dimension(:), pointer :: cutoff
     integer  :: cmax,cmaxl,igrid_level, istat,maxl
     type(dft_control_type), pointer :: dft_control
-    type(real_matrix_p_type), pointer :: h
+    type(real_matrix_p_type), DIMENSION(:), pointer :: h
     type(atomic_kind_type), dimension(:), pointer :: atomic_kind_set
     failure=.false.
 
@@ -237,7 +237,7 @@ contains
     call init_l_info(ks_env%l_info,maxl+1,cmax)
 
     nullify (ks_env%v%matrix)
-    call replicate_matrix_structure(h%matrix,ks_env%v%matrix,"POTENTIAL MATRIX")
+    call replicate_matrix_structure(h(1)%matrix,ks_env%v%matrix,"POTENTIAL MATRIX")
 
     ks_env%initialized=.true.
   end subroutine qs_ks_init
@@ -427,13 +427,13 @@ contains
        nrebuild,ex,ec,ecore,ecore_overlap,&
          ecore_self,ehartree,&
          total_rho_gspace, total_rho_elec_rspace, etotal, &
-         total_rho_core_rspace, total_rho_rspace,error)
+         total_rho_core_rspace, total_rho_rspace,error,calculate_forces)
     type(qs_ks_env_type), intent(inout), target :: ks_env
     type(global_environment_type), intent(IN) :: globenv
     type(qs_environment_type), intent(INOUT)  :: qs_env
     type(real_matrix_p_type), dimension(:), intent(inout) :: ks
     type(real_matrix_p_type), dimension(:), intent(in) :: p,p_old
-    logical, intent(in) :: rebuild
+    logical, intent(in) :: calculate_forces,rebuild
     integer, intent(in) :: nrebuild
     real(kind=wp), intent(out), optional :: ex,ec,ecore,ecore_overlap,&
          ecore_self,ehartree,&
@@ -447,7 +447,7 @@ contains
          routineP=moduleN//':'//routineN
     integer :: handle,output_unit, nelectron
     logical :: ionode, failure
-    type(real_matrix_p_type), pointer :: h
+    type(real_matrix_p_type), DIMENSION(:), pointer :: h
     type(dft_control_type), pointer :: dft_control
     failure=.false.
 !   ---------------------------------------------------------------------------
@@ -465,7 +465,7 @@ contains
     CPPrecondition(size(p_old)>0,cp_failure_level,routineP,error,failure)
 
     if (.not.failure) then
-       call calculate_ecore(h,p(1),ks_env%ecore,globenv)
+       call calculate_ecore(h(1)%matrix,p(1)%matrix,ks_env%ecore,globenv)
 
        call calculate_rho_elec(p(1),p_old(1),rebuild,ks_env%rho_rspace,&
             ks_env%rho_rspace_old,&
@@ -522,27 +522,34 @@ contains
        call coeff_transform_space(ks_env%work_gspace,ks_env%work_rspace)
 
 ! work_rspace is the hartee potential in rspace
-       call integrate_v_core_rspace(ks_env%work_rspace,ks_env%cube_info(1),&
-            ks_env%l_info,qs_env,globenv)
 
-! this following line is actually a bit ugly, since the volume element
-! is only for the integration.
-       ks_env%v_rspace(1)%pw%cr3d(:,:,:) = ks_env%v_rspace(1)%pw%pw_grid%dvol*&
-            (ks_env%v_rspace(1)%pw%cr3d(:,:,:) +&
-            ks_env%work_rspace%pw%cr3d(:,:,:))
+       ks_env%work_rspace%pw%cr3d(:,:,:) =&
+         ks_env%work_rspace%pw%pw_grid%dvol*&
+         ks_env%work_rspace%pw%cr3d(:,:,:)
+
+       IF (calculate_forces) THEN
+         CALL integrate_v_core_rspace(ks_env%work_rspace,ks_env%cube_info(1),&
+                                      ks_env%l_info,qs_env)
+       END IF
+
+       ks_env%v_rspace(1)%pw%cr3d(:,:,:) =&
+         ks_env%v_rspace(1)%pw%pw_grid%dvol*&
+         ks_env%v_rspace(1)%pw%cr3d(:,:,:) +&
+         ks_env%work_rspace%pw%cr3d(:,:,:)
 
        if (nrebuild == 1) then
-          call transfer_matrix(h%matrix,ks(1)%matrix)
+          call transfer_matrix(h(1)%matrix,ks(1)%matrix)
           call integrate_v_rspace(ks_env%v_rspace,ks_env%v_gspace,&
                ks_env%gridlevel_info,ks_env%v_rspace_old,&
-               ks_env%cube_info,ks_env%l_info,rebuild,p(1),ks(1),qs_env,globenv)
+               ks_env%cube_info,ks_env%l_info,rebuild,p(1),ks(1),qs_env,&
+               globenv,calculate_forces)
        else
           if (rebuild) call set_matrix(ks_env%v%matrix,0.0_wp)
           call integrate_v_rspace(ks_env%v_rspace,ks_env%v_gspace,&
                ks_env%gridlevel_info,ks_env%v_rspace_old,&
                ks_env%cube_info,ks_env%l_info,rebuild,p(1),ks_env%v,&
-               qs_env,globenv)
-          call add_matrices(ks(1)%matrix,1.0_wp,h%matrix,1.0_wp,ks_env%v%matrix)
+               qs_env,globenv,calculate_forces)
+          call add_matrices(ks(1)%matrix,1.0_wp,h(1)%matrix,1.0_wp,ks_env%v%matrix)
        end if
 
 !   *** Keep a copy of the old density matrix ***
