@@ -6,7 +6,7 @@
 !!   NAME
 !!     qs_conductivity
 !!   CVS id
-!!   $id$
+!!   $Id: qs_conductivity.F,v 1.5 2003/06/30 12:09:19 vondele Exp $
 !!
 !!   FUNCTION
 !! 
