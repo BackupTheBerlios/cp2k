@@ -22,6 +22,7 @@
 !!
 !!   MODIFICATION HISTORY
 !!     05.2002 moved from qs_scf (see there the history) [fawzi]
+!!     JGH [30.08.02] multi-grid arrays independent from density and potential
 !!
 !!   SOURCE
 !****************************************************************************
@@ -35,7 +36,7 @@ module qs_build_ks_matrix
   use kinds, only: wp=>dp
   use global_types, only: global_environment_type,DEBUG
   use timings, only: timeset, timestop
-  USE qs_energy_types, ONLY: qs_energy_type
+  use qs_energy_types, ONLY: qs_energy_type
   use qs_environment_types, only: qs_environment_type, get_qs_env,&
        set_qs_env
   use coefficient_types,        only: coeff_allocate,&
@@ -104,11 +105,13 @@ module qs_build_ks_matrix
   use qs_integrate_potential,   only: integrate_v_rspace, &
        integrate_v_core_rspace
   use termination, only: stop_memory, stop_program
-  implicit none
-  private
 
-  logical, private, parameter :: debug_this_module=.true.
-  character(len=*), private, parameter :: moduleN='qs_build_ks_matrix'
+  IMPLICIT NONE
+
+  PRIVATE
+
+  logical, parameter :: debug_this_module=.true.
+  character(len=*), parameter :: moduleN='qs_build_ks_matrix'
 
   public :: qs_ks_env_type
   public :: qs_ks_init, qs_ks_dealloc_ref, qs_ks_did_change,&
@@ -141,22 +144,46 @@ module qs_build_ks_matrix
 !!   SOURCE
 !***************************************************************************
   type qs_ks_env_type
+
+     ! definition of all grid types used (working grids and multigrids)
      type(pw_grid_type), dimension(:), pointer :: pw_grid
-     logical :: initialized, s_mstruct_changed, forces_up_to_date, p_changed
-     integer :: n_evals, n_electrons
-     real(kind=wp) :: total_rho_core_rspace, total_rho_rspace, total_rho_gspace
+
+     ! number of the grid used as auxilliary basis for the density
+     integer :: auxbas_grid
+
+     logical :: initialized, &
+                s_mstruct_changed, &
+                p_changed, &
+                forces_up_to_date
+     integer :: n_evals, &
+                n_electrons
+     real(kind=wp) :: total_rho_core_rspace, &
+                total_rho_rspace, &
+                total_rho_gspace
+
+     type(coeff_type), dimension(:), pointer       :: rho_gspace, &
+                                                      v_gspace, &
+                                                      v_rspace
+     type(coeff_type)                              :: v_rspace_old, &
+                                                      rho_gspace_old
+
+     ! the multigrids
+     type(coeff_type), dimension(:), pointer       :: mgrid_gspace, &
+                                                      mgrid_rspace
 
      ! rho_elec_rspace is supposed to contain the electron density (for cube output)
-     type(coeff_type), dimension(:), pointer       :: rho_gspace,rho_elec_rspace,&
-          rho_elec_rspace_old,v_gspace,v_rspace
+     type(coeff_type), dimension(:), pointer       :: rho_elec_rspace
+
      ! hartree is supposed to contain the hartree potential (for cube ouput)
-     type(coeff_type)          :: v_rspace_old,v_hartree_rspace
+     type(coeff_type)          :: v_hartree_rspace
+
+     ! the core density
+     type(coeff_type)          :: rho_core
+
      type(gridlevel_info_type) :: gridlevel_info
      type(l_info_type)         :: l_info
      type(real_matrix_p_type)  :: v
      type(cube_info_type), dimension(:), pointer :: cube_info
-     type(coeff_type)          :: rho_core
-     type(coeff_type), dimension(3) :: nabla_rho_elec_rspace
   end type qs_ks_env_type
 !!***
 !****************************************************************************
@@ -207,7 +234,8 @@ contains
     type(atomic_kind_type), dimension(:), pointer :: atomic_kind_set
     failure=.false.
 
-    nullify(ks_env%rho_elec_rspace, ks_env%rho_gspace, ks_env%rho_elec_rspace_old,&
+    nullify(ks_env%rho_elec_rspace, ks_env%rho_gspace, &
+         ks_env%mgrid_gspace, ks_env%mgrid_rspace,&
          ks_env%v_gspace, ks_env%v_rspace, ks_env%cube_info,&
          ks_env%v%matrix)
 
@@ -230,9 +258,9 @@ contains
 
     cmax = 0
     do igrid_level=1,ngrid_level
-       maxradius = maxgridpoints*maxval(ks_env%rho_elec_rspace(igrid_level)%pw%pw_grid%dr)
+       maxradius = maxgridpoints*maxval(ks_env%mgrid_rspace(igrid_level)%pw%pw_grid%dr)
        call init_cube_info(ks_env%cube_info(igrid_level),&
-            ks_env%rho_elec_rspace(igrid_level)%pw%pw_grid%dr(:),&
+            ks_env%mgrid_rspace(igrid_level)%pw%pw_grid%dr(:),&
             maxradius,cmaxl)
        cmax = max(cmax,cmaxl)
     end do
@@ -309,8 +337,8 @@ contains
        ks_env%initialized=.false.
     end if
   end subroutine qs_ks_dealloc_ref
-!***************************************************************************
 
+!***************************************************************************
 
   subroutine init_grid(ks_env,qs_env, globenv,ngrid_level, error)
     type(qs_ks_env_type), intent(inout) :: ks_env
@@ -327,6 +355,7 @@ contains
 !   *** Local variables ***
 
     integer :: handle,i,igrid_level,istat,output_unit ! ,grid_info
+    integer :: nspin, auxbas
     logical :: ionode
     type(cell_type), pointer          :: cell
     type(pw_grid_type), dimension(:), pointer :: pw_grid
@@ -342,21 +371,31 @@ contains
     call get_qs_env(qs_env,cell=cell,dft_control=dft_control)
     cutoff => dft_control%qs_control%e_cutoff
 
+    ! the density grid coincideds with one of the multi grids
+    ! maybe this could be generalised in the future
+    DO i=1,ngrid_level
+      IF ( cutoff(i) == dft_control%qs_control%cutoff ) ks_env % auxbas_grid = i
+    END DO
+
+    ! to be changed
+    nspin = 1
+    allocate (ks_env%rho_elec_rspace(nspin),STAT=istat)
+    if (istat /= 0) call stop_memory(routineP,"rho_elec_rspace",0)
+    allocate (ks_env%rho_gspace(nspin),STAT=istat)
+    if (istat /= 0) call stop_memory(routineP,"rho_gspace",0)
+    allocate (ks_env%v_rspace(nspin),STAT=istat)
+    if (istat /= 0) call stop_memory(routineP,"v_rspace",0)
+    allocate (ks_env%v_gspace(nspin),STAT=istat)
+    if (istat /= 0) call stop_memory(routineP,"v_gspace",0)
+
 !   *** Allocate the multi-grid arrays ***
 
     allocate (ks_env%pw_grid(ngrid_level),STAT=istat)
     if (istat /= 0) call stop_memory(routineP,"pw_grid",0)
-    allocate (ks_env%rho_elec_rspace(ngrid_level),STAT=istat)
-    if (istat /= 0) call stop_memory(routineP,"rho_elec_rspace",0)
-    allocate (ks_env%rho_gspace(ngrid_level),STAT=istat)
-    if (istat /= 0) call stop_memory(routineP,"rho_gspace",0)
-    allocate (ks_env%v_rspace(ngrid_level),STAT=istat)
-    if (istat /= 0) call stop_memory(routineP,"v_rspace",0)
-    allocate (ks_env%v_gspace(ngrid_level),STAT=istat)
-    if (istat /= 0) call stop_memory(routineP,"v_gspace",0)
-
-    allocate (ks_env%rho_elec_rspace_old(ngrid_level),STAT=istat)
-    if (istat /= 0) call stop_memory(routineP,"rho_elec_rspace_old",0)
+    allocate (ks_env%mgrid_rspace(ngrid_level),STAT=istat)
+    if (istat /= 0) call stop_memory(routineP,"mgrid_rspace",0)
+    allocate (ks_env%mgrid_gspace(ngrid_level),STAT=istat)
+    if (istat /= 0) call stop_memory(routineP,"mgrid_gspace",0)
 
 !   *** Construct the various coeff_type grids ***
 
@@ -389,47 +428,41 @@ contains
          END IF
        END IF
 
-       call coeff_allocate(ks_env%rho_elec_rspace(igrid_level),pw_grid(igrid_level),&
+       ! setup the multigrids
+       call coeff_allocate(ks_env%mgrid_rspace(igrid_level),pw_grid(igrid_level),&
             REALDATA3D)
-       ks_env%rho_elec_rspace(igrid_level)%pw%in_space = REALSPACE
-       call coeff_allocate(ks_env%rho_gspace(igrid_level),pw_grid(igrid_level),&
+       ks_env%mgrid_rspace(igrid_level)%pw%in_space = REALSPACE
+       call coeff_allocate(ks_env%mgrid_gspace(igrid_level),pw_grid(igrid_level),&
             COMPLEXDATA1D)
-       ks_env%rho_gspace(igrid_level)%pw%in_space = RECIPROCALSPACE
-       call coeff_allocate(ks_env%rho_elec_rspace_old(igrid_level),pw_grid(igrid_level),&
-            REALDATA3D)
-       ks_env%rho_elec_rspace_old%pw%in_space = REALSPACE
-       call coeff_allocate(ks_env%v_rspace(igrid_level),pw_grid(igrid_level),&
-            REALDATA3D)
-       ks_env%v_rspace(igrid_level)%pw%in_space = REALSPACE
-       call coeff_allocate(ks_env%v_gspace(igrid_level),pw_grid(igrid_level),&
-            COMPLEXDATA1D)
-       ks_env%v_gspace(igrid_level)%pw%in_space = RECIPROCALSPACE
+       ks_env%mgrid_gspace(igrid_level)%pw%in_space = RECIPROCALSPACE
 
     end do
 
-!   *** Following quantities are only needed for the highest cutoff grid ***
+!   *** Following quantities are only needed for the auxillary cutoff grid ***
 
-    call pw_green_fn_init(cell%green,pw_grid(1))
+    auxbas = ks_env % auxbas_grid 
+
+    call pw_green_fn_init(cell%green,pw_grid(auxbas))
 
     call init_pw_poisson_solver(cell%green)
 
-    call coeff_allocate(ks_env%v_hartree_rspace,pw_grid(1),REALDATA3D)
-    ks_env%v_hartree_rspace%pw%in_space = REALSPACE
-    call coeff_allocate(ks_env%v_rspace_old,pw_grid(1),REALDATA3D)
-    ks_env%v_rspace_old%pw%in_space = REALSPACE
-    call coeff_allocate(ks_env%rho_core,pw_grid(1),COMPLEXDATA1D)
-    ks_env%rho_core%pw%in_space = RECIPROCALSPACE
+    call coeff_allocate(ks_env%rho_elec_rspace(1),pw_grid(auxbas),REALDATA3D)
+    ks_env%rho_elec_rspace(1)%pw%in_space = REALSPACE
+    call coeff_allocate(ks_env%rho_gspace(1),pw_grid(auxbas),COMPLEXDATA1D)
+    ks_env%rho_gspace(1)%pw%in_space = RECIPROCALSPACE
+    call coeff_allocate(ks_env%v_rspace(1),pw_grid(auxbas),REALDATA3D)
+    ks_env%v_rspace(1)%pw%in_space = REALSPACE
+    call coeff_allocate(ks_env%v_gspace(1),pw_grid(auxbas),COMPLEXDATA1D)
+    ks_env%v_gspace(1)%pw%in_space = RECIPROCALSPACE
 
-!JH if (dft_control%gradient_functional) then
-!JH    do i=1,3
-!JH       call coeff_allocate(ks_env%nabla_rho_elec_rspace(i),pw_grid(1),REALDATA3D)
-!JH       ks_env%nabla_rho_elec_rspace(i)%pw%in_space = REALSPACE
-!JH    end do
-!JH    call coeff_allocate(ks_env%drho_elec_rspace,pw_grid(1),REALDATA3D)
-!JH    ks_env%drho_elec_rspace%pw%in_space = REALSPACE
-!JH    call coeff_allocate(ks_env%vxcg_rspace,pw_grid(1),REALDATA3D)
-!JH    ks_env%vxcg_rspace%pw%in_space = REALSPACE
-!JH end if
+    call coeff_allocate(ks_env%v_hartree_rspace,pw_grid(auxbas),REALDATA3D)
+    ks_env%v_hartree_rspace%pw%in_space = REALSPACE
+    call coeff_allocate(ks_env%v_rspace_old,pw_grid(auxbas),REALDATA3D)
+    ks_env%v_rspace_old%pw%in_space = REALSPACE
+    call coeff_allocate(ks_env%rho_gspace_old,pw_grid(auxbas),COMPLEXDATA1D)
+    ks_env%rho_gspace_old%pw%in_space = RECIPROCALSPACE
+    call coeff_allocate(ks_env%rho_core,pw_grid(auxbas),COMPLEXDATA1D)
+    ks_env%rho_core%pw%in_space = RECIPROCALSPACE
 
     call timestop(0.0_wp,handle)
 
@@ -539,9 +572,11 @@ contains
                             globenv)
 
        call calculate_rho_elec(p(1)%matrix,p_old(1)%matrix,r_build,&
-            ks_env%rho_elec_rspace,&
-            ks_env%rho_elec_rspace_old,&
-            ks_env%rho_gspace,ks_env%gridlevel_info,ks_env%cube_info,&
+            ks_env%rho_elec_rspace(1),&
+            ks_env%rho_gspace(1),&
+            ks_env%rho_gspace_old,&
+            ks_env%mgrid_rspace,ks_env%mgrid_gspace,&
+            ks_env%gridlevel_info,ks_env%cube_info,&
             ks_env%l_info,&
             total_rho_elec_rspace,qs_env,globenv)
 
@@ -549,13 +584,6 @@ contains
 
        ks_env%total_rho_rspace=total_rho_elec_rspace+&
             ks_env%total_rho_core_rspace
-       if (dft_control%gradient_functional) then
-          ! we have to wait for the general xc functions since we changed
-          ! to a complex1D data structure for the density
-          call stop_program("build_kohn","feature has been removed")
-          !MK      CALL calculate_nabla_rho_elec(globenv)
-          !MK      CALL coeff_zero(vxcg_rspace)
-       end if
 
        call calculate_xc_potential(ks_env=ks_env,&
             qs_env=qs_env,&
@@ -612,7 +640,8 @@ contains
                ks_env%v_hartree_rspace%pw%cr3d(:,:,:)
 
           if (r_build) call set_matrix(ks_env%v%matrix,0.0_wp)
-          call integrate_v_rspace(ks_env%v_rspace,ks_env%v_gspace,&
+          call integrate_v_rspace(ks_env%v_rspace(1),ks_env%mgrid_rspace,&
+               ks_env%mgrid_gspace, ks_env%auxbas_grid,&
                ks_env%gridlevel_info,ks_env%v_rspace_old,&
                ks_env%cube_info,ks_env%l_info,r_build,p(1),ks_env%v,&
                qs_env,globenv,calculate_forces)
@@ -842,8 +871,9 @@ if(0==0) then
     call mp_sum(ec,globenv%group)
     energy%exc = ks_env%rho_elec_rspace(1)%pw%pw_grid%dvol*(ex+ec)
 else
-!old
+!
 !   call xc_calculate ()
+!
 endif
 
     call timestop(0.0_wp,handle)
