@@ -363,16 +363,27 @@ contains
        pw_grid(igrid_level)%para%rs_dims ( 1 ) = globenv % num_pe
        pw_grid(igrid_level)%para%rs_dims ( 2 ) = 1
 
-       if (igrid_level == 1) then
-          call pw_grid_setup(cell,pw_grid(igrid_level),cutoff(igrid_level), &
-               pe_group = globenv % group, &
-               info=output_unit)
-       else
-          call pw_grid_setup(cell,pw_grid(igrid_level),cutoff(igrid_level),&
-               pe_group = globenv % group, &
-               info=output_unit,&
-               ref_grid=pw_grid(igrid_level-1))
-       end if
+       IF (igrid_level == 1) THEN
+         IF (globenv%print%pw_grid_information) THEN
+           CALL pw_grid_setup(cell,pw_grid(igrid_level),cutoff(igrid_level),&
+                              pe_group=globenv%group,&
+                              info=output_unit)
+         ELSE
+           CALL pw_grid_setup(cell,pw_grid(igrid_level),cutoff(igrid_level),&
+                              pe_group=globenv%group)
+         END IF
+       ELSE
+         IF (globenv%print%pw_grid_information) THEN
+           CALL pw_grid_setup(cell,pw_grid(igrid_level),cutoff(igrid_level),&
+                              pe_group=globenv%group,&
+                              info=output_unit,&
+                              ref_grid=pw_grid(igrid_level-1))
+         ELSE
+           CALL pw_grid_setup(cell,pw_grid(igrid_level),cutoff(igrid_level),&
+                              pe_group=globenv%group,&
+                              ref_grid=pw_grid(igrid_level-1))
+         END IF
+       END IF
 
        call coeff_allocate(ks_env%rho_rspace(igrid_level),pw_grid(igrid_level),&
             REALDATA3D)
