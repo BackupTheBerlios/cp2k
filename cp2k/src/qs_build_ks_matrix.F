@@ -23,6 +23,9 @@
 !!   MODIFICATION HISTORY
 !!     05.2002 moved from qs_scf (see there the history) [fawzi]
 !!     JGH [30.08.02] multi-grid arrays independent from density and potential
+!!     10.2002 introduced pools, uses updated rho as input,
+!!             removed most temporary variables, renamed may vars,
+!!             began conversion to LSD [fawzi]
 !!
 !!   SOURCE
 !****************************************************************************
@@ -168,7 +171,10 @@ MODULE qs_build_ks_matrix
 !!     Fawzi Mohamed
 !!
 !!   MODIFICATION HISTORY
-!!     4.2002 created [fawzi]
+!!     04.2002 created [fawzi]
+!!     10.2002 introduced pools, uses updated rho as input,
+!!             removed most temporary variables, renamed may vars,
+!!             began conversion to LSD [fawzi]
 !!
 !!   SOURCE
 !***************************************************************************
@@ -352,14 +358,15 @@ CONTAINS
   !!     KS matrix is calculated
   !!
   !!   NOTES
-  !!     -
+  !!     make rho, energy and qs_charges optional, defaulting
+  !!     to qs_env components?
   !!
   !!   INPUTS
   !!     - ks_env: the ks_env that old all the temporary objects that
   !!       the calculation of the KS matrix needs
   !!     - qs_env: the qs_env to update
   !!     - global_env: the global environment
-  !!     - rebuild: if true builds again th
+  !!     - rebuild: if true builds again the potential
   !!     - calculate_forces: if true calculate the quantities needed
   !!       to calculate the forces. Defaults to false.
   !!     - just_energy: if true updates the energies but not the
@@ -377,6 +384,7 @@ CONTAINS
   !!   MODIFICATION HISTORY
   !!     06.2002 moved from qs_scf to qs_build_ks_matrix, use of ks_env
   !!             new did_change scheme [fawzi]
+  !!     10.2002 introduced pools, uses updated rho as input, LSD [fawzi]
   !!
   !!*** *********************************************************************
   SUBROUTINE qs_ks_build_kohn_sham_matrix(ks_env,qs_env,globenv,ks,&
@@ -385,11 +393,11 @@ CONTAINS
     TYPE(global_environment_type), INTENT(IN) :: globenv
     TYPE(qs_environment_type), INTENT(INOUT)  :: qs_env
     TYPE(real_matrix_p_type), DIMENSION(:), INTENT(inout) :: ks
+    TYPE(qs_rho_type), POINTER :: rho
     TYPE(qs_energy_type), INTENT(inout), TARGET :: energy
     TYPE(qs_charges_type), POINTER :: qs_charges
     LOGICAL, INTENT(in) :: calculate_forces,rebuild, just_energy
     TYPE(cp_error_type), INTENT(inout), OPTIONAL :: error
-    TYPE(qs_rho_type), POINTER :: rho
 
     !   *** Local variables ***
 
@@ -404,7 +412,6 @@ CONTAINS
     TYPE(pw_pool_p_type), DIMENSION(:), POINTER :: pw_pools
     TYPE(pw_pool_type), POINTER :: auxbas_pw_pool
     TYPE(pw_env_type), POINTER :: pw_env
-    TYPE(qs_rho_type), POINTER :: my_rho
     TYPE(coeff_type), POINTER :: rho_core
 
     TYPE(coeff_type), DIMENSION(:), ALLOCATABLE   :: v_rspace_new
@@ -416,7 +423,7 @@ CONTAINS
     failure=.FALSE.
     r_build=rebuild
     NULLIFY(h,s,dft_control,atomic_kind_set,auxbas_pw_pool, pw_pools,&
-         pw_env,my_rho, mgrid_rspace, mgrid_gspace)
+         pw_env, mgrid_rspace, mgrid_gspace)
     !   -----------------------------------------------------------------------
 
     CALL timeset(routineN,"I","",handle)
@@ -431,13 +438,12 @@ CONTAINS
                     h=h,&
                     s=s,&
                     pw_env=pw_env,&
-                    rho_core=rho_core,&
-                    rho=my_rho)
-    my_rho => rho
+                    rho_core=rho_core)
+
     nspins=dft_control%nspins
     CPPrecondition(ASSOCIATED(h),cp_failure_level,routineP,error,failure)
     CPPrecondition(ASSOCIATED(s),cp_failure_level,routineP,error,failure)
-    CPPrecondition(ASSOCIATED(my_rho),cp_failure_level,routineP,error,failure)
+    CPPrecondition(ASSOCIATED(rho),cp_failure_level,routineP,error,failure)
     CPPrecondition(ASSOCIATED(pw_env),cp_failure_level,routineP,error,failure)
     CPPrecondition(SIZE(ks)>0,cp_failure_level,routineP,error,failure)
     
@@ -495,9 +501,9 @@ CONTAINS
             use_data = COMPLEXDATA1D,&
             in_space = RECIPROCALSPACE, error=error)
 
-       CALL coeff_add(rho_core,my_rho%rho_g(1),rho_tot_gspace)
+       CALL coeff_add(rho_core,rho%rho_g(1),rho_tot_gspace)
        DO ispin=2,nspins
-          CALL coeff_sumup(my_rho%rho_g(ispin),rho_tot_gspace)
+          CALL coeff_sumup(rho%rho_g(ispin),rho_tot_gspace)
        END DO
        qs_charges%total_rho_gspace = calculate_total_rho(rho_tot_gspace)
 
@@ -578,7 +584,7 @@ CONTAINS
                   v_rspace_old=ks_env%v_rspace(ispin),&
                   cube_info=pw_env%cube_info,&
                   l_info=pw_env%l_info,&
-                  rebuild=r_build,p=my_rho%rho_ao(ispin),h=ks_env%v(ispin),&
+                  rebuild=r_build,p=rho%rho_ao(ispin),h=ks_env%v(ispin),&
                   qs_env=qs_env,globenv=globenv,&
                   calculate_forces=calculate_forces)
              CALL add_matrices(ks(ispin)%matrix,1.0_wp,h(1)%matrix,1.0_wp,&
@@ -679,10 +685,6 @@ SUBROUTINE qs_ks_update_qs_env(ks_env,qs_env, global_env,&
              qs_charges=qs_charges,&
              calculate_forces=c_forces,just_energy=energy_only,&
              error=error)
-
-!FM        !   *** Keep a copy of the old density matrix ***
-!FM        CALL transfer_matrix(p(1)%matrix,rho%rho_ao(1)%matrix)
-        
         IF(.NOT.energy_only) THEN
            ks_env%p_changed=.FALSE.
            ks_env%s_mstruct_changed=.FALSE.
