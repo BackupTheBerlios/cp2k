@@ -54,6 +54,7 @@ MODULE qs_build_ks_matrix
   USE cp_log_handling,                 ONLY: cp_failure_level,&
                                              cp_fatal_level,&
                                              cp_log,&
+                                             cp_logger_get_default_unit_nr,&
                                              cp_logger_type,&
                                              cp_note_level,&
                                              cp_to_string,&
@@ -61,8 +62,6 @@ MODULE qs_build_ks_matrix
   USE cube_utils,                      ONLY: cube_info_type
   USE dft_types,                       ONLY: dft_control_type
   USE gaussian_gridlevels,             ONLY: gridlevel_info_type
-  USE global_types,                    ONLY: DEBUG,&
-                                             global_environment_type
   USE greens_fn,                       ONLY: pw_green_fn_init
   USE hartree,                         ONLY: calculate_hartree
   USE kinds,                           ONLY: wp=>dp
@@ -194,10 +193,9 @@ CONTAINS
 !!     qs_ks_init
 !!
 !!   SYNOPSIS
-!!     Subroutine qs_ks_init(ks_env, qs_env, global_env, error)
+!!     Subroutine qs_ks_init(ks_env, qs_env, error)
 !!       Type(qs_ks_env_type), Intent (OUT):: ks_env
 !!       Type(qs_environment_type), Intent (IN), Target:: qs_env
-!!       Type(global_environment_type), Intent (IN), Target:: global_env
 !!       Type(cp_error_type), Optional, Intent (INOUT):: error
 !!     End Subroutine qs_ks_init
 !!
@@ -210,7 +208,6 @@ CONTAINS
 !!   INPUTS
 !!     - ks_env: the ks env to be initialized
 !!     - qs_env: the qs environment
-!!     - global_env: the global environment
 !!     - error: variable to control error logging, stopping,... 
 !!       see module cp_error_handling 
 !!
@@ -221,10 +218,9 @@ CONTAINS
 !!     05.2002 created [fawzi]
 !!
 !!*** **********************************************************************
-  SUBROUTINE qs_ks_init(ks_env, qs_env, global_env, error)
+  SUBROUTINE qs_ks_init(ks_env, qs_env, error)
     TYPE(qs_ks_env_type), INTENT(out) :: ks_env
     TYPE(qs_environment_type), INTENT(in),TARGET :: qs_env
-    TYPE(global_environment_type), INTENT(in), TARGET :: global_env
     TYPE(cp_error_type), OPTIONAL, INTENT(inout) :: error
 
     INTEGER, PARAMETER :: maxgridpoints = 100
@@ -366,7 +362,6 @@ CONTAINS
 !!     - ks_env: the ks_env that old all the temporary objects that
 !!       the calculation of the KS matrix needs
 !!     - qs_env: the qs_env to update
-!!     - global_env: the global environment
 !!     - rebuild: if true builds again the potential
 !!     - calculate_forces: if true calculate the quantities needed
 !!       to calculate the forces. Defaults to false.
@@ -388,10 +383,9 @@ CONTAINS
 !!     10.2002 introduced pools, uses updated rho as input, LSD [fawzi]
 !!
 !!*** *********************************************************************
-  SUBROUTINE qs_ks_build_kohn_sham_matrix(ks_env,qs_env,globenv,ks,&
+  SUBROUTINE qs_ks_build_kohn_sham_matrix(ks_env,qs_env,ks,&
        rho,energy,qs_charges,rebuild,calculate_forces,just_energy,error)
     TYPE(qs_ks_env_type), INTENT(inout), TARGET :: ks_env
-    TYPE(global_environment_type), INTENT(IN) :: globenv
     TYPE(qs_environment_type), INTENT(INOUT)  :: qs_env
     TYPE(real_matrix_p_type), DIMENSION(:), INTENT(inout) :: ks
     TYPE(qs_rho_type), POINTER :: rho
@@ -415,6 +409,7 @@ CONTAINS
     TYPE(pw_env_type), POINTER :: pw_env
     TYPE(coeff_type), POINTER :: rho_core
     TYPE(cell_type), POINTER :: cell
+    TYPE(cp_logger_type), POINTER :: logger
 
     TYPE(coeff_type), DIMENSION(:), ALLOCATABLE   :: v_rspace_new
     TYPE(coeff_type)                              :: v_hartree_gspace,&
@@ -425,15 +420,16 @@ CONTAINS
     failure=.FALSE.
     r_build=rebuild
     NULLIFY(h,s,dft_control,atomic_kind_set,auxbas_pw_pool, pw_pools,&
-         pw_env,rho_core,cell, mgrid_rspace, mgrid_gspace)
+         pw_env,rho_core,cell, logger, mgrid_rspace, mgrid_gspace)
     !   -----------------------------------------------------------------------
 
     CALL timeset(routineN,"I","",handle)
 
     CPPrecondition(ks_env%initialized,cp_failure_level,routineP,error,failure)
 
-    ionode = globenv%ionode
-    output_unit = globenv%scr
+    logger => cp_error_get_logger(error)
+    ionode = logger%para_env%mepos==logger%para_env%source
+    output_unit = cp_logger_get_default_unit_nr(logger,local=.FALSE.)
 
     CALL get_qs_env(qs_env=qs_env,&
                     dft_control=dft_control,&
@@ -510,7 +506,7 @@ CONTAINS
        END DO
        qs_charges%total_rho_gspace = calculate_total_rho(rho_tot_gspace)
 
-       IF (ionode.AND.globenv%print%total_densities) THEN
+       IF (ionode.AND.logger%print_keys%total_densities) THEN
           WRITE (UNIT=output_unit,FMT="(/,(T3,A,T40,2F20.10))")&
                "Total electronic density (r-space): ",&
                SUM(rho%tot_rho_r),&
@@ -547,12 +543,12 @@ CONTAINS
        CALL calculate_xc_potential(ks_env=ks_env,&
             qs_env=qs_env,&
             v_rspace_new=v_rspace_new,&
-            globenv=globenv)
+            error=error)
 
        energy%total = energy%core_overlap + energy%core_self + &
             energy%core + energy%hartree + energy%exc
 
-       IF (ionode.AND.globenv%print%scf_energies) THEN
+       IF (ionode.AND.logger%print_keys%scf_energies) THEN
           WRITE (UNIT=output_unit,FMT="(/,(T3,A,T60,F20.10))")&
             "Core Hamiltonian energy:                       ",energy%core,&
             "Hartree energy:                                ",energy%hartree,&
@@ -625,11 +621,10 @@ CONTAINS
 !!     qs_ks_update_qs_env
 !!
 !!   SYNOPSIS
-!!     Subroutine qs_ks_update_qs_env(ks_env, qs_env, global_env, rebuild,&
+!!     Subroutine qs_ks_update_qs_env(ks_env, qs_env, rebuild,&
 !!         calculate_forces, just_energy, error)
 !!       Type(qs_ks_env_type), Intent (INOUT):: ks_env
 !!       Type(qs_environment_type), Intent (INOUT), Target:: qs_env
-!!       Type(global_environment_type), Intent (IN), Target:: global_env
 !!       Logical, Intent (IN), Optional:: rebuild, calculate_forces,&
 !!         just_energy
 !!       Type(cp_error_type), Optional, Intent (INOUT):: error
@@ -645,7 +640,6 @@ CONTAINS
 !!     - ks_env: the ks_env that old all the temporary objects that
 !!       the calculation of the KS matrix needs
 !!     - qs_env: the qs_env to update
-!!     - global_env: the global environment
 !!     - rebuild: if true builds again th
 !!     - calculate_forces: if true calculate the quantities needed
 !!       to calculate the forces. Defaults to false.
@@ -661,11 +655,10 @@ CONTAINS
 !!     4.2002 created [fawzi]
 !!
 !!*** **********************************************************************
-SUBROUTINE qs_ks_update_qs_env(ks_env,qs_env, global_env,&
+SUBROUTINE qs_ks_update_qs_env(ks_env,qs_env,&
      rebuild,calculate_forces, just_energy, error)
   TYPE(qs_ks_env_type), INTENT(inout) :: ks_env
   TYPE(qs_environment_type), INTENT(inout), TARGET :: qs_env
-  TYPE(global_environment_type), INTENT(in), TARGET :: global_env
   LOGICAL, INTENT(in), OPTIONAL :: rebuild, calculate_forces, just_energy
   TYPE(cp_error_type), OPTIONAL, INTENT(inout) :: error
   
@@ -696,7 +689,7 @@ SUBROUTINE qs_ks_update_qs_env(ks_env,qs_env, global_env,&
              rebuild=r_build,energy=energy,&
              error=error)
         CALL qs_ks_build_kohn_sham_matrix(ks_env,qs_env=qs_env,&
-             globenv=global_env,ks=ks,&
+             ks=ks,&
              rho=rho,energy=energy,rebuild=r_build,&
              qs_charges=qs_charges,&
              calculate_forces=c_forces,just_energy=energy_only,&
@@ -726,11 +719,10 @@ END SUBROUTINE qs_ks_update_qs_env
 !!     qs_ks_did_change
 !!
 !!   SYNOPSIS
-!!     Subroutine qs_ks_did_change(ks_env, qs_env, global_env,&
-!!         s_mstruct_changed, p_changed, full_reset, error)
+!!     Subroutine qs_ks_did_change(ks_env, qs_env, s_mstruct_changed,&
+!!         p_changed, full_reset, error)
 !!       Type(qs_ks_env_type), Intent (INOUT):: ks_env
 !!       Type(qs_environment_type), Intent (INOUT), Target:: qs_env
-!!       Type(global_environment_type), Intent (IN), Target:: global_env
 !!       Logical, Intent (IN), Optional:: s_mstruct_changed, p_changed,&
 !!         full_reset
 !!       Type(cp_error_type), Optional, Intent (INOUT):: error
@@ -747,7 +739,6 @@ END SUBROUTINE qs_ks_update_qs_env
 !!   INPUTS
 !!     - ks_env: the environement that is informed about the changes
 !!     - qs_env: the qs_environement
-!!     - global_env: the global environment
 !!     - s_mstruct_changed: if true it means that the structure of the
 !!       overlap matrix has changed
 !!       (atoms have moved)
@@ -763,11 +754,10 @@ END SUBROUTINE qs_ks_update_qs_env
 !!     4.2002 created [fawzi]
 !!
 !!*** **********************************************************************
-SUBROUTINE qs_ks_did_change(ks_env,qs_env,global_env,s_mstruct_changed,&
+SUBROUTINE qs_ks_did_change(ks_env,qs_env,s_mstruct_changed,&
      p_changed,full_reset,error)
   TYPE(qs_ks_env_type), INTENT(inout) :: ks_env
   TYPE(qs_environment_type), INTENT(inout), TARGET :: qs_env
-  TYPE(global_environment_type), INTENT(in), TARGET :: global_env
   LOGICAL, INTENT(in), OPTIONAL :: s_mstruct_changed, p_changed, full_reset
   TYPE(cp_error_type), OPTIONAL, INTENT(inout) :: error
   
@@ -822,12 +812,12 @@ END SUBROUTINE qs_ks_did_change
 !!     - moved to qs_build_ks_matrix [fawzi]
 !!
 !!*** *********************************************************************
-  SUBROUTINE calculate_xc_potential(ks_env,v_rspace_new,qs_env,globenv)
+  SUBROUTINE calculate_xc_potential(ks_env,v_rspace_new,qs_env,error)
     IMPLICIT NONE
-    TYPE(qs_ks_env_type), INTENT(inout),TARGET :: ks_env !FM remove ?
+    TYPE(qs_ks_env_type), INTENT(inout),TARGET    :: ks_env !FM remove ?
     TYPE(qs_environment_type), INTENT(in), TARGET :: qs_env
-    TYPE(global_environment_type), INTENT(IN), TARGET :: globenv
     TYPE(coeff_type), DIMENSION(:), INTENT(inout) :: v_rspace_new
+    TYPE(cp_error_type), INTENT(inout), OPTIONAL  :: error
 
 !   *** Local variables ***
 
@@ -839,7 +829,6 @@ END SUBROUTINE qs_ks_did_change
     TYPE(dft_control_type), POINTER :: dft_control
     TYPE(qs_rho_type), POINTER :: rho_struct
     TYPE(qs_energy_type), POINTER :: energy
-    TYPE(cp_error_type) :: error
 
     REAL(wp) :: ec,ex
     LOGICAL :: failure
