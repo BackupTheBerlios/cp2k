@@ -140,9 +140,8 @@ module qs_build_ks_matrix
 !!   SOURCE
 !***************************************************************************
   type qs_ks_env_type
-     type(qs_environment_type), pointer :: qs_env
      type(pw_grid_type), dimension(:), pointer :: pw_grid
-     logical :: initialized
+     logical :: initialized, s_changed
      type(coeff_type), dimension(:), pointer       :: rho_gspace,rho_rspace,&
           rho_rspace_old,v_gspace,v_rspace
      type(coeff_type)          :: drho_rspace,v_rspace_old,vxcg_rspace,&
@@ -205,8 +204,6 @@ contains
     type(real_matrix_p_type), pointer :: h
     type(atomic_kind_type), dimension(:), pointer :: atomic_kind_set
     failure=.false.
-
-    ks_env%qs_env => qs_env
 
     call init_functionals()
     call get_qs_env(qs_env=qs_env,&
@@ -283,7 +280,6 @@ contains
 
     CPPrecondition(ks_env%initialized,cp_failure_level,routineP,error,failure)
     if (.not. failure) then
-       nullify(ks_env%qs_env)
        call cp_unimplemented_error(routineP, "grid deallocation not done in "//&
             CPSourceFileRef,&
             error=error, error_level=cp_warning_level)
