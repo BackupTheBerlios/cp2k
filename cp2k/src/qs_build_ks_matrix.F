@@ -187,6 +187,7 @@ MODULE qs_build_ks_matrix
                 n_electrons
 
      ! hartree is supposed to contain the hartree potential (for cube ouput)
+     ! ugly to keep it always around only for a cube output...
      TYPE(coeff_type) :: v_hartree_rspace
      TYPE(coeff_type), DIMENSION(:), POINTER :: v_rspace
 
