@@ -595,7 +595,7 @@ contains
 
           call coeff_transform_space(ks_env%work_gspace,ks_env%work_rspace)
 
-          ! work_rspace is the hartee potential in rspace
+          ! work_rspace is the hartree potential in rspace
 
           ks_env%work_rspace%pw%cr3d(:,:,:) =&
                ks_env%work_rspace%pw%pw_grid%dvol*&
