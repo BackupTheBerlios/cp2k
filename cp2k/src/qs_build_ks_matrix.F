@@ -77,12 +77,6 @@ module qs_build_ks_matrix
        gth_potential_type
   use message_passing,          only: mp_max,mp_sum,mp_sync,&
        mp_range,mp_allgather
-  use qs_collocate_density,     only: calculate_rho_core,&
-       calculate_rho_elec,&
-       calculate_total_rho
-  use qs_core_energies,         only: calculate_ecore,&
-       calculate_ecore_overlap,&
-       calculate_ecore_self
   use qs_overlap,               only: write_blacs_matrix,&
        write_sparse_matrix
   use simulation_cell,          only: cell_type,&
