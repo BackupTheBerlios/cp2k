@@ -27,10 +27,11 @@
 !****************************************************************************
 module qs_build_ks_matrix
   use cp_log_handling, only: cp_fatal_level, cp_failure_level,&
-       cp_warning_level, cp_note_level, cp_to_string
+       cp_warning_level, cp_note_level, cp_to_string, cp_log
   use cp_error_handling, only: cp_debug, cp_error_type, cp_error_init,&
        cp_error_dealloc_ref, cp_error_message, cp_assert,&
-       cp_assertion_failed, cp_internal_error, cp_unimplemented_error
+       cp_assertion_failed, cp_internal_error, cp_unimplemented_error,&
+       cp_error_get_logger
   use kinds, only: wp=>dp
   use global_types, only: global_environment_type,DEBUG
   use timings, only: timeset, timestop
@@ -100,6 +101,7 @@ module qs_build_ks_matrix
   use qs_integrate_potential,   only: integrate_v_rspace, &
        integrate_v_core_rspace
   use termination, only: stop_memory, stop_program
+  use qs_energy_types, only : qs_energy_type
   implicit none
   private
 
@@ -107,7 +109,8 @@ module qs_build_ks_matrix
   character(len=*), private, parameter :: moduleN='qs_build_ks_matrix'
 
   public :: qs_ks_env_type
-  public :: qs_ks_init, qs_ks_dealloc_ref, build_kohn_sham_matrix
+  public :: qs_ks_init, qs_ks_dealloc_ref, qs_ks_did_change,&
+       qs_ks_update_qs_env
 !***
 !****************************************************************************
 
@@ -118,7 +121,8 @@ module qs_build_ks_matrix
 !!
 !!   FUNCTION
 !!     calculation environement to calculate the ks matrix,
-!!     holds all the needed vars
+!!     holds all the needed vars.
+!!     assumes that the core hamiltonian and energy are up to date.
 !!
 !!   NOTES
 !!     -
@@ -136,14 +140,13 @@ module qs_build_ks_matrix
 !***************************************************************************
   type qs_ks_env_type
      type(pw_grid_type), dimension(:), pointer :: pw_grid
-     logical :: initialized, s_changed
+     logical :: initialized, s_changed, p_changed, forces_up_to_date
+     integer :: n_evals, n_electrons
+     real(kind=wp) :: total_rho_core_rspace, total_rho_rspace, total_rho_gspace
      type(coeff_type), dimension(:), pointer       :: rho_gspace,rho_rspace,&
           rho_rspace_old,v_gspace,v_rspace
 !JH  type(coeff_type)          :: drho_rspace,vxcg_rspace
      type(coeff_type)          :: v_rspace_old,work_gspace,work_rspace
-     real(wp)          :: ex,ec,ecore,ecore_overlap,ecore_self,ehartree,&
-          total_rho_gspace, total_rho_elec_rspace, etotal, &
-          total_rho_core_rspace, total_rho_rspace
      type(gridlevel_info_type) :: gridlevel_info
      type(l_info_type)         :: l_info
      type(real_matrix_p_type)  :: v
@@ -200,9 +203,13 @@ contains
     type(atomic_kind_type), dimension(:), pointer :: atomic_kind_set
     failure=.false.
 
+    nullify(ks_env%rho_rspace, ks_env%rho_gspace, ks_env%rho_rspace_old,&
+         ks_env%v_gspace, ks_env%v_rspace, ks_env%cube_info,&
+         ks_env%v%matrix)
+
     call init_functionals()
     call get_qs_env(qs_env=qs_env,&
-         dft_control=dft_control,atomic_kind_set=atomic_kind_set, h=h)
+         dft_control=dft_control,atomic_kind_set=atomic_kind_set)
 
     rel_cutoff = dft_control%qs_control%relative_cutoff
     cutoff => dft_control%qs_control%e_cutoff
@@ -227,13 +234,19 @@ contains
     end do
 
     call get_atomic_kind_set(atomic_kind_set=atomic_kind_set,&
-         maxl=maxl)
-! maxl+1 to allow for the forces
+         maxl=maxl, nelectron=ks_env%n_electrons)
+    ks_env%n_electrons=ks_env%n_electrons-dft_control%charge
+
+    ! maxl+1 to allow for the forces
     call init_l_info(ks_env%l_info,maxl+1,cmax)
 
-    nullify (ks_env%v%matrix)
-    call replicate_matrix_structure(h(1)%matrix,ks_env%v%matrix,"POTENTIAL MATRIX")
-
+    ks_env%total_rho_core_rspace=-1.0
+    ks_env%total_rho_rspace=-1.0
+    ks_env%total_rho_gspace=-1.0
+    ks_env%s_changed=.true.
+    ks_env%p_changed=.true.
+    ks_env%forces_up_to_date=.false.
+    ks_env%n_evals=0
     ks_env%initialized=.true.
   end subroutine qs_ks_init
 !***************************************************************************
@@ -343,12 +356,6 @@ contains
 
 !   *** Construct the various coeff_type grids ***
 
-!!$    if (globenv%print%pw_grid_information) then
-!!$       grid_info = output_unit
-!!$    else
-!!$       grid_info = -1
-!!$    end if
-
     pw_grid => ks_env%pw_grid
     do igrid_level=1,ngrid_level
        call pw_grid_construct(pw_grid(igrid_level))
@@ -417,53 +424,79 @@ contains
 
 ! *****************************************************************************
 
-
-  subroutine build_kohn_sham_matrix(ks_env,qs_env,globenv,ks,p,p_old,rebuild,&
-       nrebuild,ex,ec,ecore,ecore_overlap,&
-       ecore_self,ehartree,&
-       total_rho_gspace, total_rho_elec_rspace, etotal, &
-       total_rho_core_rspace, total_rho_rspace,error,calculate_forces,just_energy)
+  !!****f* qs_build_ks_matrix/qs_ks_build_kohn_sham_matrix [1.0] *
+  !!
+  !!   NAME
+  !!     qs_ks_build_kohn_sham_matrix
+  !!
+  !!   FUNCTION
+  !!     private routine where the real calculations are made: the
+  !!     KS matrix is calculated
+  !!
+  !!   NOTES
+  !!     -
+  !!
+  !!   INPUTS
+  !!     - ks_env: the ks_env that old all the temporary objects that
+  !!       the calculation of the KS matrix needs
+  !!     - qs_env: the qs_env to update
+  !!     - global_env: the global environment
+  !!     - rebuild: if true builds again th
+  !!     - calculate_forces: if true calculate the quantities needed
+  !!       to calculate the forces. Defaults to false.
+  !!     - just_energy: if true updates the energies but not the
+  !!       ks matrix. Defaults to false
+  !!     - ks: the KS matrix that is created
+  !!     - p: the actual density matrix
+  !!     - p_old: the old density matrix
+  !!     - energy: the place where energies are stored
+  !!     - error: variable to control error logging, stopping,... 
+  !!       see module cp_error_handling 
+  !!
+  !!   AUTHOR
+  !!     Matthias Krack
+  !!
+  !!   MODIFICATION HISTORY
+  !!     6.2002 moved from qs_scf to qs_build_ks_matrix, use of ks_env
+  !!            new did_change scheme [fawzi]
+  !!
+  !!*** *********************************************************************
+  subroutine qs_ks_build_kohn_sham_matrix(ks_env,qs_env,globenv,ks,p,&
+       p_old,energy,rebuild,&
+       calculate_forces,just_energy,error)
     type(qs_ks_env_type), intent(inout), target :: ks_env
     type(global_environment_type), intent(IN) :: globenv
     type(qs_environment_type), intent(INOUT)  :: qs_env
     type(real_matrix_p_type), dimension(:), intent(inout) :: ks
     type(real_matrix_p_type), dimension(:), intent(in) :: p,p_old
-    logical, intent(in) :: calculate_forces,rebuild
-    integer, intent(in) :: nrebuild
-    logical, intent(in), optional :: just_energy
-    real(kind=wp), intent(out), optional :: ex,ec,ecore,ecore_overlap,&
-         ecore_self,ehartree,&
-         total_rho_gspace, total_rho_elec_rspace, etotal, &
-         total_rho_core_rspace, total_rho_rspace
+    type(qs_energy_type), intent(inout), target :: energy
+    logical, intent(in) :: calculate_forces,rebuild, just_energy
     type(cp_error_type), intent(inout), optional :: error
 
-!   *** Local variables ***
+    !   *** Local variables ***
 
-    TYPE(qs_energy_type), POINTER :: energy
-
-    character(len=*), parameter :: routineN='build_kohn_sham_matrix',&
+    real(wp)          :: total_rho_elec_rspace
+    character(len=*), parameter :: routineN='qs_ks_build_kohn_sham_matrix',&
          routineP=moduleN//':'//routineN
-    integer :: handle,output_unit, nelectron
-    logical :: ionode, failure, energy_only
+    integer :: handle,output_unit
+    logical :: ionode, failure,r_build
     type(real_matrix_p_type), DIMENSION(:), pointer :: h
     type(dft_control_type), pointer :: dft_control
+    type(atomic_kind_type), dimension(:), pointer :: atomic_kind_set
     failure=.false.
-!   ---------------------------------------------------------------------------
+    r_build=rebuild
+    !   -----------------------------------------------------------------------
 
-    call timeset("build_kohn_sham_matrix","I","",handle)
+    call timeset(routineN,"I","",handle)
+
+    CPPrecondition(ks_env%initialized,cp_failure_level,routineP,error,failure)
 
     ionode = globenv%ionode
     output_unit = globenv%scr
-    energy_only = .false.
-    IF (present(just_energy)) THEN
-       energy_only = just_energy
-    END IF
 
     call get_qs_env(qs_env=qs_env,&
-                    h=h,&
-                    dft_control=dft_control,&
-                    energy=energy,&
-                    n_electrons=nelectron)
+         h=h,&
+         dft_control=dft_control)
 
     CPPrecondition(associated(h),cp_failure_level,routineP,error,failure)
     CPPrecondition(size(ks)>0,cp_failure_level,routineP,error,failure)
@@ -471,31 +504,47 @@ contains
     CPPrecondition(size(p_old)>0,cp_failure_level,routineP,error,failure)
 
     if (.not.failure) then
+       if (ks_env%s_changed) then
+          ! update qs_env%k structure?
+          
+          if (associated(ks_env%v%matrix)) then
+             call deallocate_matrix(ks_env%v%matrix)
+          end if
+          nullify (ks_env%v%matrix)
+          call replicate_matrix_structure(h(1)%matrix,ks_env%v%matrix,"POTENTIAL MATRIX")
+          r_build=.true.
+
+          CALL calculate_rho_core(ks_env%rho_core,ks_env%cube_info(1),&
+               ks_env%l_info,&
+               ks_env%total_rho_core_rspace,qs_env,globenv)
+          ks_env%s_changed=.false.
+       end if
+
        call calculate_ecore(h(1)%matrix,p(1)%matrix,energy%core,globenv)
 
-       call calculate_rho_elec(p(1),p_old(1),rebuild,ks_env%rho_rspace,&
+       call calculate_rho_elec(p(1),p_old(1),r_build,ks_env%rho_rspace,&
             ks_env%rho_rspace_old,&
             ks_env%rho_gspace,ks_env%gridlevel_info,ks_env%cube_info,&
             ks_env%l_info,&
-            ks_env%total_rho_elec_rspace,qs_env,globenv)
+            total_rho_elec_rspace,qs_env,globenv)
 
        call coeff_zero(ks_env%v_rspace(1))
-       
-       ks_env%total_rho_rspace=ks_env%total_rho_elec_rspace+&
+
+       ks_env%total_rho_rspace=total_rho_elec_rspace+&
             ks_env%total_rho_core_rspace
        if (dft_control%gradient_functional) then
-! we have to wait for the general xc functions since we changed
-! to a complex1D data structure for the density
+          ! we have to wait for the general xc functions since we changed
+          ! to a complex1D data structure for the density
           call stop_program("build_kohn","feature has been removed")
-!MK      CALL calculate_nabla_rho_elec(globenv)
-!MK      CALL coeff_zero(vxcg_rspace)
+          !MK      CALL calculate_nabla_rho_elec(globenv)
+          !MK      CALL coeff_zero(vxcg_rspace)
        end if
 
        call calculate_xc_potential(ks_env=ks_env,&
-                                   qs_env=qs_env,&
-                                   globenv=globenv)
+            qs_env=qs_env,&
+            globenv=globenv)
 
-! add the core density to the electronic density
+       ! add the core density to the electronic density
        call coeff_sumup(ks_env%rho_core,ks_env%rho_gspace(1))
 
        ks_env%total_rho_gspace = calculate_total_rho(ks_env%rho_gspace(1))
@@ -503,11 +552,11 @@ contains
        if (ionode.and.globenv%print%total_densities) then
           write (UNIT=output_unit,FMT="(/,(T3,A,T40,2F20.10))")&
                "Total electronic density (r-space): ",&
-               ks_env%total_rho_elec_rspace,ks_env%total_rho_elec_rspace + &
-               real(nelectron,wp),&
+               total_rho_elec_rspace,total_rho_elec_rspace + &
+               real(ks_env%n_electrons,wp),&
                "Total core charge density (r-space):",&
                ks_env%total_rho_core_rspace,ks_env%total_rho_core_rspace - &
-               real(nelectron,wp)
+               real(ks_env%n_electrons,wp)
           write (UNIT=output_unit,FMT="(T3,A,T60,F20.10)")&
                "Total charge density (r-space):     ",ks_env%total_rho_rspace,&
                "Total charge density (g-space):     ",ks_env%total_rho_gspace
@@ -516,86 +565,205 @@ contains
        call calculate_hartree(ks_env%rho_gspace(1),energy%hartree,&
             ks_env%work_gspace)
 
-!MK energy entries should be removed from ks_env
-       ks_env%ecore = energy%core
-       ks_env%ecore_overlap = energy%core_overlap
-       ks_env%ecore_self = energy%core_self
-       ks_env%ehartree = energy%hartree
-       ks_env%ec = energy%correlation
-       ks_env%ex = energy%exchange
-       ks_env%etotal = ks_env%ecore_overlap + ks_env%ecore_self + &
-            ks_env%ecore + ks_env%ehartree + ks_env%ex + ks_env%ec
-       energy%total = ks_env%etotal
+       energy%total = energy%core_overlap + energy%core_self + &
+            energy%core + energy%hartree + energy%exchange + energy%correlation
 
        if (ionode.and.globenv%print%scf_energies) then
           write (UNIT=output_unit,FMT="(/,(T3,A,T60,F20.10))")&
-               "Core Hamiltonian energy:                       ",ks_env%ecore,&
-               "Hartree energy:                                ",ks_env%ehartree,&
-               "Exchange-correlation energy:                   ",ks_env%ex + ks_env%ec
+               "Core Hamiltonian energy:                       ",energy%core,&
+               "Hartree energy:                                ",&
+               energy%hartree,&
+               "Exchange-correlation energy:                   ",&
+               energy%exchange + energy%correlation
        end if
 
-       if (.not. energy_only) then
+       if (.not. just_energy) then
 
-         call coeff_transform_space(ks_env%work_gspace,ks_env%work_rspace)
+          call coeff_transform_space(ks_env%work_gspace,ks_env%work_rspace)
 
-! work_rspace is the hartee potential in rspace
+          ! work_rspace is the hartee potential in rspace
 
-         ks_env%work_rspace%pw%cr3d(:,:,:) =&
-           ks_env%work_rspace%pw%pw_grid%dvol*&
-           ks_env%work_rspace%pw%cr3d(:,:,:)
+          ks_env%work_rspace%pw%cr3d(:,:,:) =&
+               ks_env%work_rspace%pw%pw_grid%dvol*&
+               ks_env%work_rspace%pw%cr3d(:,:,:)
 
-         IF (calculate_forces) THEN
-           CALL integrate_v_core_rspace(ks_env%work_rspace,ks_env%cube_info(1),&
-                                        ks_env%l_info,qs_env)
-         END IF
+          IF (calculate_forces) THEN
+             CALL integrate_v_core_rspace(ks_env%work_rspace,&
+                  ks_env%cube_info(1),&
+                  ks_env%l_info,qs_env)
+          END IF
 
-         ks_env%v_rspace(1)%pw%cr3d(:,:,:) =&
-           ks_env%v_rspace(1)%pw%pw_grid%dvol*&
-           ks_env%v_rspace(1)%pw%cr3d(:,:,:) +&
-           ks_env%work_rspace%pw%cr3d(:,:,:)
+          ks_env%v_rspace(1)%pw%cr3d(:,:,:) =&
+               ks_env%v_rspace(1)%pw%pw_grid%dvol*&
+               ks_env%v_rspace(1)%pw%cr3d(:,:,:) +&
+               ks_env%work_rspace%pw%cr3d(:,:,:)
 
-         if (nrebuild == 1) then
-            call transfer_matrix(h(1)%matrix,ks(1)%matrix)
-            call integrate_v_rspace(ks_env%v_rspace,ks_env%v_gspace,&
-                 ks_env%gridlevel_info,ks_env%v_rspace_old,&
-                 ks_env%cube_info,ks_env%l_info,rebuild,p(1),ks(1),qs_env,&
-                 globenv,calculate_forces)
-         else
-            if (rebuild) call set_matrix(ks_env%v%matrix,0.0_wp)
-            call integrate_v_rspace(ks_env%v_rspace,ks_env%v_gspace,&
-                 ks_env%gridlevel_info,ks_env%v_rspace_old,&
-                 ks_env%cube_info,ks_env%l_info,rebuild,p(1),ks_env%v,&
-                 qs_env,globenv,calculate_forces)
-            call add_matrices(ks(1)%matrix,1.0_wp,h(1)%matrix,1.0_wp,ks_env%v%matrix)
-         end if
+          if (r_build) call set_matrix(ks_env%v%matrix,0.0_wp)
+          call integrate_v_rspace(ks_env%v_rspace,ks_env%v_gspace,&
+               ks_env%gridlevel_info,ks_env%v_rspace_old,&
+               ks_env%cube_info,ks_env%l_info,r_build,p(1),ks_env%v,&
+               qs_env,globenv,calculate_forces)
+          call add_matrices(ks(1)%matrix,1.0_wp,h(1)%matrix,1.0_wp,&
+               ks_env%v%matrix)
 
        end if
-
-!   *** Keep a copy of the old density matrix ***
-
-       call transfer_matrix(p(1)%matrix,p_old(1)%matrix)
 
     end if
 
-!MK All this optional arguments should disappear
-    if (present(ex)) ex=ks_env%ex
-    if (present(ec)) ec=ks_env%ec
-    if (present(ecore)) ecore=ks_env%ecore
-    if (present(ecore_overlap)) ecore_overlap=ks_env%ecore_overlap
-    if (present(ecore_self)) ecore_self=ks_env%ecore_self
-    if (present(ehartree)) ehartree=ks_env%ehartree
-    if (present(total_rho_gspace)) total_rho_gspace=ks_env%total_rho_gspace
-    if (present(total_rho_elec_rspace)) total_rho_elec_rspace=ks_env%total_rho_elec_rspace
-    if (present(etotal)) etotal=ks_env%etotal
-    if (present(total_rho_core_rspace)) total_rho_core_rspace=ks_env%total_rho_core_rspace
-    if (present(total_rho_rspace)) total_rho_rspace=ks_env%total_rho_rspace
-    
     call timestop(0.0_wp,handle)
 
-  end subroutine build_kohn_sham_matrix
-
+  end subroutine qs_ks_build_kohn_sham_matrix
 ! *****************************************************************************
 
+!!****f* qs_build_ks_matrix/qs_ks_update_qs_env [1.0] *
+!!
+!!   NAME
+!!     qs_ks_update_qs_env
+!!
+!!   FUNCTION
+!!     updates the Kohn Sham matrix of the given qs_env (facility method)
+!!
+!!   NOTES
+!!     -
+!!
+!!   INPUTS
+!!     - ks_env: the ks_env that old all the temporary objects that
+!!       the calculation of the KS matrix needs
+!!     - qs_env: the qs_env to update
+!!     - global_env: the global environment
+!!     - rebuild: if true builds again th
+!!     - calculate_forces: if true calculate the quantities needed
+!!       to calculate the forces. Defaults to false.
+!!     - just_energy: if true updates the energies but not the
+!!       ks matrix. Defaults to false
+!!     - error: variable to control error logging, stopping,... 
+!!       see module cp_error_handling 
+!!
+!!   AUTHOR
+!!     Fawzi Mohamed
+!!
+!!   MODIFICATION HISTORY
+!!     4.2002 created [fawzi]
+!!
+!!*** **********************************************************************
+subroutine qs_ks_update_qs_env(ks_env,qs_env, global_env,&
+     rebuild,calculate_forces, just_energy, error)
+  type(qs_ks_env_type), intent(inout) :: ks_env
+  type(qs_environment_type), intent(inout), target :: qs_env
+  type(global_environment_type), intent(in), target :: global_env
+  logical, intent(in), optional :: rebuild, calculate_forces, just_energy
+  type(cp_error_type), optional, intent(inout) :: error
+  
+  logical :: failure, r_build, c_forces, energy_only, did_update
+  character(len=*), parameter :: routineN='qs_ks_update_qs_env',&
+        routineP=moduleN//':'//routineN
+  type(real_matrix_p_type), dimension(:), pointer :: ks,p,p_old
+  type(qs_energy_type), pointer :: energy
+  failure=.false.
+  did_update=.false.
+  r_build=.false.; c_forces=.false.; energy_only = .false.
+  if (present(just_energy)) energy_only=just_energy
+  if (present(calculate_forces)) c_forces=calculate_forces
+  if (present(rebuild)) r_build=rebuild
+
+  CPPrecondition(ks_env%initialized,cp_failure_level,routineP,error,failure)
+  if (.not. failure) then
+     if (ks_env%p_changed .or. ks_env%s_changed .or.&
+          (c_forces.and..not.ks_env%forces_up_to_date)) then
+        did_update=.true.
+        call get_qs_env(qs_env,k=ks,p=p,p_old=p_old,energy=energy)
+        call qs_ks_build_kohn_sham_matrix(ks_env,qs_env=qs_env,&
+             globenv=global_env,ks=ks,p=p,&
+             p_old=p_old,energy=energy,rebuild=r_build,&
+             calculate_forces=c_forces,just_energy=energy_only,&
+             error=error)
+
+        !   *** Keep a copy of the old density matrix ***
+        call transfer_matrix(p(1)%matrix,p_old(1)%matrix)
+        
+        if(.not.energy_only) then
+           ks_env%p_changed=.false.
+           ks_env%s_changed=.false.
+           ks_env%forces_up_to_date=.not.c_forces
+        end if
+     end if
+  end if
+  if (cp_debug.and.debug_this_module) then
+     if (did_update) then
+        call cp_log(cp_error_get_logger(error),cp_note_level,routineP,&
+             "did update")
+     else
+        call cp_log(cp_error_get_logger(error),cp_note_level,routineP,&
+             "did NOT update")
+     end if
+  end if
+end subroutine qs_ks_update_qs_env
+!***************************************************************************
+
+!!****f* qs_build_ks_matrix/qs_ks_did_change [1.0] *
+!!
+!!   NAME
+!!     qs_ks_did_change
+!!
+!!   FUNCTION
+!!     tells that some of the things relevant to the ks calculation
+!!     did change. has to be called when changes happen otherwise
+!!     the calculation will give wrong results.
+!!
+!!   NOTES
+!!     -
+!!
+!!   INPUTS
+!!     - ks_env: the environement that is informed about the changes
+!!     - qs_env: the qs_environement
+!!     - global_env: the global environment
+!!     - s_changed: if true it means that the overlap matrix has changed
+!!       (atoms have moved)
+!!     - p_changed: if true it means that the density has changed
+!!     - full_reset: if true everything has changed
+!!     - error: variable to control error logging, stopping,... 
+!!       see module cp_error_handling 
+!!
+!!   AUTHOR
+!!     Fawzi Mohamed
+!!
+!!   MODIFICATION HISTORY
+!!     4.2002 created [fawzi]
+!!
+!!*** **********************************************************************
+subroutine qs_ks_did_change(ks_env,qs_env,global_env,s_changed,p_changed,&
+     full_reset,error)
+  type(qs_ks_env_type), intent(inout) :: ks_env
+  type(qs_environment_type), intent(inout), target :: qs_env
+  type(global_environment_type), intent(in), target :: global_env
+  logical, intent(in), optional :: s_changed, p_changed, full_reset
+  type(cp_error_type), optional, intent(inout) :: error
+  
+  logical :: failure
+  character(len=*), parameter :: routineN='qs_ks_did_change',&
+        routineP=moduleN//':'//routineN
+  failure=.false.
+  
+  CPPrecondition(ks_env%initialized,cp_failure_level,routineP,error,failure)
+  if (.not. failure) then
+     if (present(p_changed)) then
+        if (p_changed) ks_env%p_changed=.true.
+     end if
+     if (present(s_changed)) then
+        if (s_changed) then
+           ks_env%p_changed=.true.
+           ks_env%s_changed=.true.
+        end if
+     end if
+     if (present(full_reset)) then
+        if (full_reset) then
+           ks_env%p_changed=.true.
+           ks_env%s_changed=.true.
+        end if
+     end if
+  end if
+end subroutine qs_ks_did_change
+!***************************************************************************
 
 !!****f* cp_log_handling/calculate_xc_potential [1.0] *
 !!
