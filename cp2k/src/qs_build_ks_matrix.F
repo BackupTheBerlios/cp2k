@@ -58,25 +58,16 @@ MODULE qs_build_ks_matrix
                                              cp_note_level,&
                                              cp_to_string,&
                                              cp_warning_level
-  USE cube_utils,                      ONLY: cube_info_type,&
-                                             destroy_cube_info,&
-                                             init_cube_info
+  USE cube_utils,                      ONLY: cube_info_type
   USE dft_types,                       ONLY: dft_control_type
-  USE external_potential_types,        ONLY: all_potential_type,&
-                                             get_potential,&
-                                             gth_potential_type
-  USE functionals
-  USE gaussian_gridlevels,             ONLY: destroy_gaussian_gridlevel,&
-                                             gridlevel_info_type,&
-                                             init_gaussian_gridlevel
+  USE functionals,                     ONLY: init_functionals
+  USE gaussian_gridlevels,             ONLY: gridlevel_info_type
   USE global_types,                    ONLY: DEBUG,&
                                              global_environment_type
   USE greens_fn,                       ONLY: pw_green_fn_init
   USE hartree,                         ONLY: calculate_hartree
   USE kinds,                           ONLY: wp=>dp
-  USE l_utils,                         ONLY: destroy_l_info,&
-                                             init_l_info,&
-                                             l_info_type
+  USE l_utils,                         ONLY: l_info_type
   USE message_passing,                 ONLY: mp_allgather,&
                                              mp_max,&
                                              mp_range,&
@@ -272,7 +263,7 @@ CONTAINS
     IF (.NOT.failure) THEN
        DO ispin=1,nspins
           CALL pw_pool_init_coeff(auxbas_pw_pool,ks_env%v_rspace(ispin),&
-               use_data=REALDATA3D, in_space=REALSPACE)
+               use_data=REALDATA3D, in_space=REALSPACE,error=error)
        END DO
        CALL pw_pool_init_coeff(auxbas_pw_pool,ks_env%v_hartree_rspace,&
             use_data=REALDATA3D, in_space=REALSPACE)
@@ -586,8 +577,8 @@ CONTAINS
                   cube_info=pw_env%cube_info,&
                   l_info=pw_env%l_info,&
                   rebuild=r_build,p=rho%rho_ao(ispin),h=ks_env%v(ispin),&
-                  qs_env=qs_env,globenv=globenv,&
-                  calculate_forces=calculate_forces)
+                  qs_env=qs_env,&
+                  calculate_forces=calculate_forces,error=error)
              CALL add_matrices(ks(ispin)%matrix,1.0_wp,h(1)%matrix,1.0_wp,&
                   ks_env%v(ispin)%matrix)
           END DO
