@@ -834,24 +834,24 @@ END SUBROUTINE qs_ks_did_change
     ! test if the real space density is available
     CPPrecondition(ASSOCIATED(rho_struct),cp_failure_level,routineP,error,failure)
     CPPrecondition(rho_struct%ref_count>0,cp_failure_level,routineP,error,failure)
-    CPPrecondition(rho_struct%rho_elec_r_valid,cp_failure_level,routineP,error,failure)
+    CPPrecondition(rho_struct%rho_r_valid,cp_failure_level,routineP,error,failure)
     IF ( .NOT. failure ) THEN
 
       ! for gradient corrected functional we need the density in g space
       IF ( qs_env%dft_control%gradient_functional ) THEN
          IF ( .NOT. rho_struct%rho_g_valid ) THEN
-            DO i=1,SIZE(rho_struct%rho_elec_r)
-               CALL coeff_transform_space(rho_struct%rho_elec_r(i),rho_struct%rho_g(i))
+            DO i=1,SIZE(rho_struct%rho_r)
+               CALL coeff_transform_space(rho_struct%rho_r(i),rho_struct%rho_g(i))
             END DO
          END IF
       END IF
 
       IF ( qs_env%dft_control%nspins == 1) THEN
-         CALL xc_calculate (rho_struct%rho_elec_r(1)%pw,&
+         CALL xc_calculate (rho_struct%rho_r(1)%pw,&
               rho_struct%rho_g(1)%pw,&
               v_rspace_new(1)%pw,&
               energy%exc,qs_env%dft_control)
-         energy%exc = rho_struct%rho_elec_r(1)%pw%pw_grid%dvol*energy%exc
+         energy%exc = rho_struct%rho_r(1)%pw%pw_grid%dvol*energy%exc
       ELSEIF ( qs_env%dft_control%nspins == 2) THEN
          CALL stop_program(routineP,"NA")
       ELSE
