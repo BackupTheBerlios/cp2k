@@ -27,12 +27,13 @@
 !!   SOURCE
 !****************************************************************************
 MODULE qs_build_ks_matrix
-
   USE atomic_kind_types,               ONLY: atomic_kind_type,&
                                              get_atomic_kind,&
                                              get_atomic_kind_set
-  USE coefficient_types,               ONLY: coeff_allocate,&
+  USE coefficient_types,               ONLY: coeff_add,&
+                                             coeff_allocate,&
                                              coeff_copy,&
+                                             coeff_deallocate,&
                                              coeff_sumup,&
                                              coeff_transform_space,&
                                              coeff_type,&
@@ -85,8 +86,12 @@ MODULE qs_build_ks_matrix
   USE pw_grids,                        ONLY: pw_find_cutoff,&
                                              pw_grid_construct,&
                                              pw_grid_setup
-  USE pw_pool_types,                   ONLY: pw_pool_p_type,&
-                                             pw_pool_type
+  USE pw_pool_types,                   ONLY: pw_pool_give_back_coeff,&
+                                             pw_pool_init_coeff,&
+                                             pw_pool_p_type,&
+                                             pw_pool_type,&
+                                             pw_pools_give_back_coeffs,&
+                                             pw_pools_init_coeffs
   USE pw_types,                        ONLY: COMPLEXDATA1D,&
                                              COMPLEXDATA3D,&
                                              REALDATA3D,&
@@ -95,12 +100,10 @@ MODULE qs_build_ks_matrix
                                              pw_type
   USE pws,                             ONLY: init_pw_poisson_solver,&
                                              pw_poisson_solver
+  USE qs_charges_types,                ONLY: qs_charges_type
   USE qs_collocate_density,            ONLY: calculate_rho_core,&
                                              calculate_rho_elec,&
                                              calculate_total_rho
-  USE qs_core_energies,                ONLY: calculate_ecore,&
-                                             calculate_ecore_overlap,&
-                                             calculate_ecore_self
   USE qs_energy_types,                 ONLY: qs_energy_type
   USE qs_environment_types,            ONLY: get_qs_env,&
                                              qs_environment_type,&
@@ -109,6 +112,7 @@ MODULE qs_build_ks_matrix
                                              integrate_v_rspace
   USE qs_overlap,                      ONLY: write_blacs_matrix,&
                                              write_sparse_matrix
+  USE qs_rho_methods,                  ONLY: qs_rho_update_rho
   USE qs_rho_types,                    ONLY: qs_rho_did_change,&
                                              qs_rho_type
   USE simulation_cell,                 ONLY: cell_type,&
@@ -131,7 +135,6 @@ MODULE qs_build_ks_matrix
   USE timings,                         ONLY: timeset,&
                                              timestop
   USE xc,                              ONLY: xc_calculate
-
   IMPLICIT NONE
 
   PRIVATE
@@ -170,39 +173,18 @@ MODULE qs_build_ks_matrix
 !!   SOURCE
 !***************************************************************************
   TYPE qs_ks_env_type
-
-     ! definition of all grid types used (working grids and multigrids)
-     TYPE(pw_grid_type), DIMENSION(:), POINTER :: pw_grid
-
-     ! number of the grid used as auxilliary basis for the density
-     INTEGER :: auxbas_grid
-
      LOGICAL :: initialized, &
                 s_mstruct_changed, &
                 p_changed, &
                 forces_up_to_date
      INTEGER :: n_evals, &
                 n_electrons
-     REAL(kind=wp) :: total_rho_core_rspace, &
-                total_rho_rspace, &
-                total_rho_gspace
-
-     TYPE(coeff_type), DIMENSION(:), POINTER       :: rho_gspace, &
-                                                      v_gspace, &
-                                                      v_rspace
-     TYPE(coeff_type)                              :: v_rspace_old
-
-     ! the multigrids
-     TYPE(coeff_type), DIMENSION(:), POINTER       :: mgrid_gspace, &
-                                                      mgrid_rspace
 
      ! hartree is supposed to contain the hartree potential (for cube ouput)
-     TYPE(coeff_type)          :: v_hartree_rspace
+     TYPE(coeff_type) :: v_hartree_rspace
+     TYPE(coeff_type), DIMENSION(:), POINTER :: v_rspace
 
-     ! the core density
-     TYPE(coeff_type)          :: rho_core
-
-     TYPE(real_matrix_p_type)  :: v
+     TYPE(real_matrix_p_type), DIMENSION(:), POINTER :: v
   END TYPE qs_ks_env_type
 !!***
 !****************************************************************************
@@ -235,7 +217,7 @@ CONTAINS
 !!
 !!*** **********************************************************************
   SUBROUTINE qs_ks_init(ks_env, qs_env, global_env, error)
-    TYPE(qs_ks_env_type), INTENT(inout) :: ks_env
+    TYPE(qs_ks_env_type), INTENT(out) :: ks_env
     TYPE(qs_environment_type), INTENT(in),TARGET :: qs_env
     TYPE(global_environment_type), INTENT(in), TARGET :: global_env
     TYPE(cp_error_type), OPTIONAL, INTENT(inout) :: error
@@ -245,45 +227,58 @@ CONTAINS
          routineP=moduleN//':'//routineN
     LOGICAL :: failure
     REAL(wp)          :: rel_cutoff,maxradius
-    INTEGER :: ngrid_level
     REAL(wp), DIMENSION(:), POINTER :: cutoff
-    INTEGER  :: cmax,cmaxl,igrid_level, istat,maxl
+    INTEGER  :: cmax,cmaxl, maxl, stat, ispin, nspins, handle
     TYPE(dft_control_type), POINTER :: dft_control
     TYPE(real_matrix_p_type), DIMENSION(:), POINTER :: h
     TYPE(atomic_kind_type), DIMENSION(:), POINTER :: atomic_kind_set
-
-    IF (ks_env%initialized) RETURN
+    TYPE(pw_pool_type), POINTER :: auxbas_pw_pool
+    TYPE(pw_env_type), POINTER :: pw_env
+    TYPE(cell_type), POINTER :: cell
 
     failure=.FALSE.
+    NULLIFY( ks_env%v_rspace, ks_env%v, pw_env, auxbas_pw_pool)
 
-    NULLIFY(ks_env%rho_gspace, &
-         ks_env%mgrid_gspace, ks_env%mgrid_rspace,&
-         ks_env%v_gspace, ks_env%v_rspace, &
-         ks_env%v%matrix)
-
+    CALL timeset(routineN,"I","",handle)
     CALL init_functionals()
     CALL get_qs_env(qs_env=qs_env,&
-         dft_control=dft_control,atomic_kind_set=atomic_kind_set)
+         dft_control=dft_control,atomic_kind_set=atomic_kind_set,&
+         pw_env=pw_env, cell=cell)
+    CALL pw_env_get(pw_env,auxbas_pw_pool=auxbas_pw_pool)
 
     rel_cutoff = dft_control%qs_control%relative_cutoff
     cutoff => dft_control%qs_control%e_cutoff
-    ngrid_level = SIZE(cutoff)
-
-    CALL init_grid(ks_env,qs_env=qs_env,globenv=global_env, &
-         ngrid_level=ngrid_level,error=error)
+    nspins=dft_control%nspins
 
     CALL get_atomic_kind_set(atomic_kind_set=atomic_kind_set,&
          maxl=maxl, nelectron=ks_env%n_electrons)
     ks_env%n_electrons=ks_env%n_electrons-dft_control%charge
 
-    ks_env%total_rho_core_rspace=-1.0
-    ks_env%total_rho_rspace=-1.0
-    ks_env%total_rho_gspace=-1.0
     ks_env%s_mstruct_changed=.TRUE.
     ks_env%p_changed=.TRUE.
     ks_env%forces_up_to_date=.FALSE.
     ks_env%n_evals=0
     ks_env%initialized=.TRUE.
+
+    ALLOCATE(ks_env%v_rspace(nspins),stat=stat)
+    CPPostcondition(stat==0,cp_failure_level,routineP,error,failure)
+    IF (.NOT.failure) THEN
+       DO ispin=1,nspins
+          CALL pw_pool_init_coeff(auxbas_pw_pool,ks_env%v_rspace(ispin),&
+               use_data=REALDATA3D, in_space=REALSPACE)
+       END DO
+       CALL pw_pool_init_coeff(auxbas_pw_pool,ks_env%v_hartree_rspace,&
+            use_data=REALDATA3D, in_space=REALSPACE)
+       
+       CALL pw_green_fn_init(cell%green,auxbas_pw_pool%pw_grid)
+       
+       CALL init_pw_poisson_solver(cell%green)
+    ELSE
+     ks_env%initialized=.FALSE.
+   END IF
+
+   CALL timestop(0.0_wp,handle)
+
   END SUBROUTINE qs_ks_init
 !***************************************************************************
 
@@ -310,131 +305,42 @@ CONTAINS
 !!     05.2002 created [fawzi]
 !!
 !!*** **********************************************************************
-  SUBROUTINE qs_ks_dealloc_ref(ks_env,qs_env,global_env,error)
+  SUBROUTINE qs_ks_dealloc_ref(ks_env,error)
     TYPE(qs_ks_env_type), INTENT(inout) :: ks_env
-    TYPE(qs_environment_type), INTENT(in),TARGET :: qs_env
-    TYPE(global_environment_type), INTENT(in), TARGET :: global_env
     TYPE(cp_error_type), OPTIONAL, INTENT(inout) :: error
 
     LOGICAL :: failure
     CHARACTER(len=*), PARAMETER :: routineN='qs_ks_dealloc_ref',&
          routineP=moduleN//':'//routineN
-    INTEGER :: igrid_level,istat
+    INTEGER :: stat, ispin
     failure=.FALSE.
 
     CPPrecondition(ks_env%initialized,cp_failure_level,routineP,error,failure)
     IF (.NOT. failure) THEN
-       CALL cp_unimplemented_error(routineP, "grid deallocation not done in "//&
-            CPSourceFileRef,&
-            error=error, error_level=cp_warning_level)
-
+       ! try to give back the grids?
+       CALL coeff_deallocate(ks_env%v_hartree_rspace)
+       IF (ASSOCIATED(ks_env%v_rspace)) THEN
+          DO ispin=1,SIZE(ks_env%v_rspace)
+             CALL coeff_deallocate(ks_env%v_rspace(ispin))
+          END DO
+          DEALLOCATE(ks_env%v_rspace,stat=stat)
+          CPPostconditionNoFail(stat==0,cp_warning_level,routineP,error)
+       END IF
+       IF (ASSOCIATED(ks_env%v)) THEN
+          DO ispin=1,SIZE(ks_env%v)
+             IF (ASSOCIATED(ks_env%v(ispin)%matrix)) THEN
+                CALL deallocate_matrix(ks_env%v(ispin)%matrix)
+             END IF
+          END DO
+          DEALLOCATE(ks_env%v, stat=stat)
+          CPPostconditionNoFail(stat==0,cp_warning_level,routineP,error)
+       END IF
+       
        ks_env%initialized=.FALSE.
     END IF
   END SUBROUTINE qs_ks_dealloc_ref
 
 !***************************************************************************
-
-  SUBROUTINE init_grid(ks_env,qs_env, globenv,ngrid_level, error)
-    TYPE(qs_ks_env_type), INTENT(inout) :: ks_env
-    TYPE(qs_environment_type), INTENT(in), TARGET :: qs_env
-    TYPE(global_environment_type), INTENT(in), TARGET :: globenv
-    TYPE(cp_error_type), INTENT(inout), OPTIONAL :: error
-    INTEGER, INTENT(in) :: ngrid_level
-
-!   *** Local parameters ***
-
-    CHARACTER(LEN=*), PARAMETER :: routineN ="init_grid",&
-         routineP=routineN//':'//moduleN
-
-!   *** Local variables ***
-
-    INTEGER :: handle,i,igrid_level,istat,output_unit ! ,grid_info
-    INTEGER :: nspin, auxbas
-    LOGICAL :: ionode
-    TYPE(cell_type), POINTER          :: cell
-    TYPE(pw_grid_type), DIMENSION(:), POINTER :: pw_grid
-    TYPE(dft_control_type), POINTER :: dft_control
-    TYPE(pw_env_type), POINTER :: pw_env
-    TYPE(pw_pool_p_type), DIMENSION(:), POINTER :: pw_pools
-    REAL(kind=wp), DIMENSION(:), POINTER :: cutoff
-
-!   ---------------------------------------------------------------------------
-
-    CALL timeset("init_grid","I","",handle)
-
-    ionode = globenv%ionode
-    output_unit = globenv%scr
-    CALL get_qs_env(qs_env,cell=cell,dft_control=dft_control, pw_env=pw_env)
-    CALL pw_env_get(pw_env, pw_pools=pw_pools)
-    cutoff => dft_control%qs_control%e_cutoff
-
-    ! the density grid coincideds with one of the multi grids
-    ! maybe this could be generalised in the future
-    DO i=1,ngrid_level
-      IF ( cutoff(i) == dft_control%qs_control%cutoff ) ks_env % auxbas_grid = i
-    END DO
-
-    ! to be changed
-    nspin = 1
-    ALLOCATE (ks_env%rho_gspace(nspin),STAT=istat)
-    IF (istat /= 0) CALL stop_memory(routineP,"rho_gspace",0)
-    ALLOCATE (ks_env%v_rspace(nspin),STAT=istat)
-    IF (istat /= 0) CALL stop_memory(routineP,"v_rspace",0)
-    ALLOCATE (ks_env%v_gspace(nspin),STAT=istat)
-    IF (istat /= 0) CALL stop_memory(routineP,"v_gspace",0)
-
-!   *** Allocate the multi-grid arrays ***
-
-    ALLOCATE (ks_env%pw_grid(ngrid_level),STAT=istat)
-    IF (istat /= 0) CALL stop_memory(routineP,"pw_grid",0)
-    ALLOCATE (ks_env%mgrid_rspace(ngrid_level),STAT=istat)
-    IF (istat /= 0) CALL stop_memory(routineP,"mgrid_rspace",0)
-    ALLOCATE (ks_env%mgrid_gspace(ngrid_level),STAT=istat)
-    IF (istat /= 0) CALL stop_memory(routineP,"mgrid_gspace",0)
-
-!   *** Construct the various coeff_type grids ***
-
-    pw_grid => ks_env%pw_grid
-    DO igrid_level=1,ngrid_level
-       pw_grid(igrid_level)=pw_pools(igrid_level)%pool%pw_grid
-
-       ! setup the multigrids
-       CALL coeff_allocate(ks_env%mgrid_rspace(igrid_level),pw_grid(igrid_level),&
-            REALDATA3D)
-       ks_env%mgrid_rspace(igrid_level)%pw%in_space = REALSPACE
-       CALL coeff_allocate(ks_env%mgrid_gspace(igrid_level),pw_grid(igrid_level),&
-            COMPLEXDATA1D)
-       ks_env%mgrid_gspace(igrid_level)%pw%in_space = RECIPROCALSPACE
-
-    END DO
-
-!   *** Following quantities are only needed for the auxillary cutoff grid ***
-
-    auxbas = ks_env % auxbas_grid 
-
-    CALL pw_green_fn_init(cell%green,pw_grid(auxbas))
-
-    CALL init_pw_poisson_solver(cell%green)
-
-    CALL coeff_allocate(ks_env%rho_gspace(1),pw_grid(auxbas),COMPLEXDATA1D)
-    ks_env%rho_gspace(1)%pw%in_space = RECIPROCALSPACE
-    CALL coeff_allocate(ks_env%v_rspace(1),pw_grid(auxbas),REALDATA3D)
-    ks_env%v_rspace(1)%pw%in_space = REALSPACE
-    CALL coeff_allocate(ks_env%v_gspace(1),pw_grid(auxbas),COMPLEXDATA1D)
-    ks_env%v_gspace(1)%pw%in_space = RECIPROCALSPACE
-
-    CALL coeff_allocate(ks_env%v_hartree_rspace,pw_grid(auxbas),REALDATA3D)
-    ks_env%v_hartree_rspace%pw%in_space = REALSPACE
-    CALL coeff_allocate(ks_env%v_rspace_old,pw_grid(auxbas),REALDATA3D)
-    ks_env%v_rspace_old%pw%in_space = REALSPACE
-    CALL coeff_allocate(ks_env%rho_core,pw_grid(auxbas),COMPLEXDATA1D)
-    ks_env%rho_core%pw%in_space = RECIPROCALSPACE
-
-    CALL timestop(0.0_wp,handle)
-
-  END SUBROUTINE init_grid
-
-! *****************************************************************************
 
   !!****f* qs_build_ks_matrix/qs_ks_build_kohn_sham_matrix [1.0] *
   !!
@@ -459,10 +365,9 @@ CONTAINS
   !!     - just_energy: if true updates the energies but not the
   !!       ks matrix. Defaults to false
   !!     - ks: the KS matrix that is created
-  !!     - p: the actual density matrix, if not given it uses rho%rho_ao
-  !!     - rho: the density, rho%rho_r and rho%rho_g must be valid
-  !!       if p is not vaild then rho%rho_ao must also be valid
+  !!     - rho: the density, must be up to date
   !!     - energy: the place where energies are stored
+  !!     - qs_charges: the place where the grids charges are stored
   !!     - error: variable to control error logging, stopping,... 
   !!       see module cp_error_handling 
   !!
@@ -470,18 +375,18 @@ CONTAINS
   !!     Matthias Krack
   !!
   !!   MODIFICATION HISTORY
-  !!     6.2002 moved from qs_scf to qs_build_ks_matrix, use of ks_env
-  !!            new did_change scheme [fawzi]
+  !!     06.2002 moved from qs_scf to qs_build_ks_matrix, use of ks_env
+  !!             new did_change scheme [fawzi]
   !!
   !!*** *********************************************************************
-  SUBROUTINE qs_ks_build_kohn_sham_matrix(ks_env,qs_env,globenv,ks,p,&
-       rho,energy,rebuild,calculate_forces,just_energy,error)
+  SUBROUTINE qs_ks_build_kohn_sham_matrix(ks_env,qs_env,globenv,ks,&
+       rho,energy,qs_charges,rebuild,calculate_forces,just_energy,error)
     TYPE(qs_ks_env_type), INTENT(inout), TARGET :: ks_env
     TYPE(global_environment_type), INTENT(IN) :: globenv
     TYPE(qs_environment_type), INTENT(INOUT)  :: qs_env
     TYPE(real_matrix_p_type), DIMENSION(:), INTENT(inout) :: ks
-    TYPE(real_matrix_p_type), DIMENSION(:), INTENT(in) :: p
     TYPE(qs_energy_type), INTENT(inout), TARGET :: energy
+    TYPE(qs_charges_type), POINTER :: qs_charges
     LOGICAL, INTENT(in) :: calculate_forces,rebuild, just_energy
     TYPE(cp_error_type), INTENT(inout), OPTIONAL :: error
     TYPE(qs_rho_type), POINTER :: rho
@@ -491,17 +396,27 @@ CONTAINS
     REAL(wp)          :: total_rho_elec_rspace
     CHARACTER(len=*), PARAMETER :: routineN='qs_ks_build_kohn_sham_matrix',&
          routineP=moduleN//':'//routineN
-    INTEGER :: handle,output_unit
+    INTEGER :: handle,output_unit, nspins, ispin, stat
     LOGICAL :: ionode, failure,r_build
     TYPE(real_matrix_p_type), DIMENSION(:), POINTER :: h,s
     TYPE(dft_control_type), POINTER :: dft_control
     TYPE(atomic_kind_type), DIMENSION(:), POINTER :: atomic_kind_set
     TYPE(pw_pool_p_type), DIMENSION(:), POINTER :: pw_pools
+    TYPE(pw_pool_type), POINTER :: auxbas_pw_pool
     TYPE(pw_env_type), POINTER :: pw_env
     TYPE(qs_rho_type), POINTER :: my_rho
+    TYPE(coeff_type), POINTER :: rho_core
+
+    TYPE(coeff_type), DIMENSION(:), ALLOCATABLE   :: v_rspace_new
+    TYPE(coeff_type)                              :: v_hartree_gspace,&
+                                                     rho_tot_gspace
+    TYPE(coeff_type), DIMENSION(:), POINTER       :: mgrid_gspace, &
+                                                     mgrid_rspace
+
     failure=.FALSE.
     r_build=rebuild
-    NULLIFY(my_rho,pw_env,pw_pools,atomic_kind_set,dft_control,h,s)
+    NULLIFY(h,s,dft_control,atomic_kind_set,auxbas_pw_pool, pw_pools,&
+         pw_env,my_rho, mgrid_rspace, mgrid_gspace)
     !   -----------------------------------------------------------------------
 
     CALL timeset(routineN,"I","",handle)
@@ -516,81 +431,112 @@ CONTAINS
                     h=h,&
                     s=s,&
                     pw_env=pw_env,&
+                    rho_core=rho_core,&
                     rho=my_rho)
     my_rho => rho
+    nspins=dft_control%nspins
     CPPrecondition(ASSOCIATED(h),cp_failure_level,routineP,error,failure)
     CPPrecondition(ASSOCIATED(s),cp_failure_level,routineP,error,failure)
     CPPrecondition(ASSOCIATED(my_rho),cp_failure_level,routineP,error,failure)
     CPPrecondition(ASSOCIATED(pw_env),cp_failure_level,routineP,error,failure)
     CPPrecondition(SIZE(ks)>0,cp_failure_level,routineP,error,failure)
-    CPPrecondition(SIZE(p)>0,cp_failure_level,routineP,error,failure)
+    
+    ! gets the tmp grids
+    IF (.NOT. failure) THEN
+       CALL pw_env_get(pw_env, auxbas_pw_pool=auxbas_pw_pool,&
+            pw_pools=pw_pools)
+       ALLOCATE(v_rspace_new(nspins), stat=stat)
+       CPPostcondition(stat==0,cp_failure_level,routineP,error,failure)
+       ALLOCATE(mgrid_rspace(SIZE(pw_pools)), mgrid_gspace(SIZE(pw_pools)),&
+            stat=stat)
+       CPPostcondition(stat==0,cp_failure_level,routineP,error,failure)
+    END IF
+    IF (.NOT.failure) THEN
+       CALL pw_pool_init_coeff(auxbas_pw_pool,v_hartree_gspace,&
+               use_data = COMPLEXDATA1D,&
+               in_space = RECIPROCALSPACE, error=error)
+       CALL pw_pools_init_coeffs(pw_pools,mgrid_gspace,&
+            use_data = COMPLEXDATA1D,&
+            in_space = RECIPROCALSPACE, error=error)
+       CALL pw_pools_init_coeffs(pw_pools,mgrid_rspace,&
+            use_data = REALDATA3D,&
+            in_space = REALSPACE, error=error)
+    END IF
 
     IF (.NOT.failure) THEN
        IF (ks_env%s_mstruct_changed) THEN
-          ! update qs_env%k structure?
-          
-          IF (ASSOCIATED(ks_env%v%matrix)) THEN
-             CALL deallocate_matrix(ks_env%v%matrix)
+          IF (ASSOCIATED(ks_env%v)) THEN
+             DO ispin=1,SIZE(ks_env%v)
+                IF (ASSOCIATED(ks_env%v(ispin)%matrix)) THEN
+                   CALL deallocate_matrix(ks_env%v(ispin)%matrix)
+                END IF
+             END DO
+             DEALLOCATE(ks_env%v,stat=stat)
+             CPPostconditionNoFail(stat==0,cp_warning_level,routineP,error)
           END IF
-          NULLIFY (ks_env%v%matrix)
-          CALL replicate_matrix_structure(h(1)%matrix,ks_env%v%matrix,&
-               "POTENTIAL MATRIX")
+          ALLOCATE(ks_env%v(nspins),stat=stat)
+          CPPostcondition(stat==0,cp_failure_level,routineP,error,failure)
+          IF (.NOT. failure) THEN
+             DO ispin=1,nspins
+                NULLIFY(ks_env%v(ispin)%matrix)
+                CALL replicate_matrix_structure(h(1)%matrix,&
+                     ks_env%v(ispin)%matrix,&
+                     "POTENTIAL MATRIX "//ADJUSTL(cp_to_string(ispin)))
+             END DO
+          END IF
           r_build=.TRUE.
-
-          CALL calculate_rho_core(ks_env%rho_core,pw_env%cube_info(1),&
-               pw_env%l_info,&
-               ks_env%total_rho_core_rspace,qs_env,error=error)
           ks_env%s_mstruct_changed=.FALSE.
-        END IF
+       END IF
+    END IF
 
-! to rm
-       CALL calculate_ecore(h(1)%matrix,p(1)%matrix,s(1)%matrix,energy%core,&
-                            globenv)
+! *** calculate the hartree potential on the total density ***
+    IF (.NOT. failure) THEN
+       CALL pw_pool_init_coeff(auxbas_pw_pool,rho_tot_gspace,&
+            use_data = COMPLEXDATA1D,&
+            in_space = RECIPROCALSPACE, error=error)
 
-       CALL calculate_rho_elec(p=p(1)%matrix,p_old=my_rho%rho_ao(1)%matrix,&
-            rebuild=r_build,&
-            rho=my_rho%rho_r(1),&
-            rho_gspace=ks_env%rho_gspace(1),&
-            rho_gspace_old=my_rho%rho_g(1),&
-            mgrid_rspace=ks_env%mgrid_rspace,mgrid_gspace=ks_env%mgrid_gspace,&
-            gridlevel_info=pw_env%gridlevel_info,cube_info=pw_env%cube_info,&
-            l_info=pw_env%l_info,&
-            total_rho=total_rho_elec_rspace,qs_env=qs_env,error=error)
-
-! has this to be done here???
-!deb   CALL qs_rho_did_change(my_rho,rho_r_valid=.TRUE.,error=error)
-       my_rho%rho_r_valid=.TRUE.
-! to rm
-
-       CALL coeff_zero(ks_env%v_rspace(1))
-
-       ks_env%total_rho_rspace=total_rho_elec_rspace+&
-            ks_env%total_rho_core_rspace
-
-       CALL calculate_xc_potential(ks_env=ks_env,&
-            qs_env=qs_env,&
-            globenv=globenv)
-       
-       ! add the core density to the electronic density
-       CALL coeff_sumup(ks_env%rho_core,ks_env%rho_gspace(1))
-
-       ks_env%total_rho_gspace = calculate_total_rho(ks_env%rho_gspace(1))
+       CALL coeff_add(rho_core,my_rho%rho_g(1),rho_tot_gspace)
+       DO ispin=2,nspins
+          CALL coeff_sumup(my_rho%rho_g(ispin),rho_tot_gspace)
+       END DO
+       qs_charges%total_rho_gspace = calculate_total_rho(rho_tot_gspace)
 
        IF (ionode.AND.globenv%print%total_densities) THEN
           WRITE (UNIT=output_unit,FMT="(/,(T3,A,T40,2F20.10))")&
                "Total electronic density (r-space): ",&
-               total_rho_elec_rspace,total_rho_elec_rspace + &
+               SUM(qs_charges%total_rho_elec_rspace),&
+               SUM(qs_charges%total_rho_elec_rspace) + &
                REAL(ks_env%n_electrons,wp),&
                "Total core charge density (r-space):",&
-               ks_env%total_rho_core_rspace,ks_env%total_rho_core_rspace - &
-               REAL(ks_env%n_electrons,wp)
+               qs_charges%total_rho_core_rspace,&
+               qs_charges%total_rho_core_rspace - REAL(ks_env%n_electrons,wp)
           WRITE (UNIT=output_unit,FMT="(T3,A,T60,F20.10)")&
-               "Total charge density (r-space):     ",ks_env%total_rho_rspace,&
-               "Total charge density (g-space):     ",ks_env%total_rho_gspace
+               "Total charge density (r-space):     ",&
+               SUM(qs_charges%total_rho_elec_rspace)+&
+               qs_charges%total_rho_core_rspace,&
+               "Total charge density (g-space):     ",&
+               qs_charges%total_rho_gspace
        END IF
 
-       CALL calculate_hartree(ks_env%rho_gspace(1),energy%hartree,&
-            ks_env%v_gspace(1))
+       CALL calculate_hartree(rho_tot_gspace,energy%hartree,&
+            v_hartree_gspace)
+
+       CALL pw_pool_give_back_coeff(auxbas_pw_pool,rho_tot_gspace,&
+            error=error)
+
+! *** calculate the xc potential ***       
+
+       DO ispin=1,nspins
+          CALL pw_pool_init_coeff(auxbas_pw_pool,v_rspace_new(ispin),&
+               use_data = REALDATA3D,&
+               in_space = REALSPACE, error=error)
+          CALL coeff_zero(v_rspace_new(ispin))
+       END DO
+
+       CALL calculate_xc_potential(ks_env=ks_env,&
+            qs_env=qs_env,&
+            v_rspace_new=v_rspace_new,&
+            globenv=globenv)
 
        energy%total = energy%core_overlap + energy%core_self + &
             energy%core + energy%hartree + energy%exc
@@ -604,7 +550,8 @@ CONTAINS
 
        IF (.NOT. just_energy) THEN
 
-          CALL coeff_transform_space(ks_env%v_gspace(1),ks_env%v_hartree_rspace)
+          CALL coeff_transform_space(v_hartree_gspace,&
+               ks_env%v_hartree_rspace)
 
           ks_env%v_hartree_rspace%pw%cr3d(:,:,:) =&
                ks_env%v_hartree_rspace%pw%pw_grid%dvol*&
@@ -616,21 +563,43 @@ CONTAINS
                   pw_env%l_info,qs_env)
           END IF
 
-          ks_env%v_rspace(1)%pw%cr3d(:,:,:) =&
-               ks_env%v_rspace(1)%pw%pw_grid%dvol*&
-               ks_env%v_rspace(1)%pw%cr3d(:,:,:) +&
-               ks_env%v_hartree_rspace%pw%cr3d(:,:,:)
-
-          IF (r_build) CALL set_matrix(ks_env%v%matrix,0.0_wp)
-          CALL integrate_v_rspace(ks_env%v_rspace(1),ks_env%mgrid_rspace,&
-               ks_env%mgrid_gspace, ks_env%auxbas_grid,&
-               pw_env%gridlevel_info,ks_env%v_rspace_old,&
-               pw_env%cube_info,pw_env%l_info,r_build,p(1),ks_env%v,&
-               qs_env,globenv,calculate_forces)
-          CALL add_matrices(ks(1)%matrix,1.0_wp,h(1)%matrix,1.0_wp,&
-               ks_env%v%matrix)
-
+          DO ispin=1,nspins
+             v_rspace_new(ispin)%pw%cr3d(:,:,:) =&
+                  v_rspace_new(ispin)%pw%pw_grid%dvol*&
+                  v_rspace_new(ispin)%pw%cr3d(:,:,:) +&
+                  ks_env%v_hartree_rspace%pw%cr3d(:,:,:)
+             
+             IF (r_build) CALL set_matrix(ks_env%v(ispin)%matrix,0.0_wp)
+             CALL integrate_v_rspace(v_rspace=v_rspace_new(ispin),&
+                  mgrid_rspace=mgrid_rspace,&
+                  mgrid_gspace=mgrid_gspace,&
+                  auxbas_grid=pw_env%auxbas_grid,&
+                  gridlevel_info=pw_env%gridlevel_info,&
+                  v_rspace_old=ks_env%v_rspace(ispin),&
+                  cube_info=pw_env%cube_info,&
+                  l_info=pw_env%l_info,&
+                  rebuild=r_build,p=my_rho%rho_ao(ispin),h=ks_env%v(ispin),&
+                  qs_env=qs_env,globenv=globenv,&
+                  calculate_forces=calculate_forces)
+             CALL add_matrices(ks(ispin)%matrix,1.0_wp,h(1)%matrix,1.0_wp,&
+                  ks_env%v(ispin)%matrix)
+          END DO
        END IF
+
+       CALL pw_pool_give_back_coeff(auxbas_pw_pool,v_hartree_gspace,&
+            error=error)
+       DO ispin=1,nspins
+          CALL pw_pool_give_back_coeff(auxbas_pw_pool,v_rspace_new(ispin),&
+               error=error)
+       END DO
+       CALL pw_pools_give_back_coeffs(pw_pools,mgrid_gspace,&
+            error=error)
+       CALL pw_pools_give_back_coeffs(pw_pools,mgrid_rspace,&
+            error=error)
+       DEALLOCATE(v_rspace_new, stat=stat) ! just to be sure...
+       CPPostconditionNoFail(stat==0,cp_warning_level,routineP,error)
+       DEALLOCATE(mgrid_rspace, mgrid_gspace, stat=stat)
+       CPPostconditionNoFail(stat==0,cp_warning_level,routineP,error)
 
     END IF
 
@@ -683,6 +652,7 @@ SUBROUTINE qs_ks_update_qs_env(ks_env,qs_env, global_env,&
         routineP=moduleN//':'//routineN
   TYPE(real_matrix_p_type), DIMENSION(:), POINTER :: ks,p
   TYPE(qs_energy_type), POINTER :: energy
+  TYPE(qs_charges_type), POINTER :: qs_charges
   TYPE(cp_logger_type), POINTER :: logger
   TYPE(qs_rho_type), POINTER :: rho
   failure=.FALSE.
@@ -698,15 +668,20 @@ SUBROUTINE qs_ks_update_qs_env(ks_env,qs_env, global_env,&
      IF (ks_env%p_changed .OR. ks_env%s_mstruct_changed .OR.&
           (c_forces.AND..NOT.ks_env%forces_up_to_date)) THEN
         did_update=.TRUE.
-        CALL get_qs_env(qs_env,k=ks,p=p,rho=rho,energy=energy)
+        CALL get_qs_env(qs_env,k=ks,p=p,rho=rho,energy=energy,&
+             qs_charges=qs_charges)
+        CALL qs_rho_update_rho(rho, rho_ao_new=p,qs_env=qs_env,&
+             rebuild=r_build, qs_charges=qs_charges,energy=energy,&
+             error=error)
         CALL qs_ks_build_kohn_sham_matrix(ks_env,qs_env=qs_env,&
-             globenv=global_env,ks=ks,p=p,&
+             globenv=global_env,ks=ks,&
              rho=rho,energy=energy,rebuild=r_build,&
+             qs_charges=qs_charges,&
              calculate_forces=c_forces,just_energy=energy_only,&
              error=error)
 
-        !   *** Keep a copy of the old density matrix ***
-        CALL transfer_matrix(p(1)%matrix,rho%rho_ao(1)%matrix)
+!FM        !   *** Keep a copy of the old density matrix ***
+!FM        CALL transfer_matrix(p(1)%matrix,rho%rho_ao(1)%matrix)
         
         IF(.NOT.energy_only) THEN
            ks_env%p_changed=.FALSE.
@@ -818,11 +793,12 @@ END SUBROUTINE qs_ks_did_change
 !!     - moved to qs_build_ks_matrix [fawzi]
 !!
 !!*** *********************************************************************
-  SUBROUTINE calculate_xc_potential(ks_env,qs_env,globenv)
+  SUBROUTINE calculate_xc_potential(ks_env,v_rspace_new,qs_env,globenv)
     IMPLICIT NONE
-    TYPE(qs_ks_env_type), INTENT(inout),TARGET :: ks_env
+    TYPE(qs_ks_env_type), INTENT(inout),TARGET :: ks_env !FM remove ?
     TYPE(qs_environment_type), INTENT(in), TARGET :: qs_env
     TYPE(global_environment_type), INTENT(IN), TARGET :: globenv
+    TYPE(coeff_type), DIMENSION(:), INTENT(inout) :: v_rspace_new
 
 !   *** Local variables ***
 
@@ -856,27 +832,28 @@ END SUBROUTINE qs_ks_did_change
     ! test if the real space density is available
     CPPrecondition(ASSOCIATED(rho_struct),cp_failure_level,routineP,error,failure)
     CPPrecondition(rho_struct%ref_count>0,cp_failure_level,routineP,error,failure)
-    CPPrecondition(rho_struct%rho_r_valid,cp_failure_level,routineP,error,failure)
+    CPPrecondition(rho_struct%rho_elec_r_valid,cp_failure_level,routineP,error,failure)
     IF ( .NOT. failure ) THEN
 
       ! for gradient corrected functional we need the density in g space
       IF ( qs_env%dft_control%gradient_functional ) THEN
          IF ( .NOT. rho_struct%rho_g_valid ) THEN
-            DO i=1,SIZE(rho_struct%rho_r)
-               call coeff_transform_space(rho_struct%rho_r(i),rho_struct%rho_g(i))
+            DO i=1,SIZE(rho_struct%rho_elec_r)
+               CALL coeff_transform_space(rho_struct%rho_elec_r(i),rho_struct%rho_g(i))
             END DO
          END IF
       END IF
 
       IF ( qs_env%dft_control%nspins == 1) THEN
-         call xc_calculate (rho_struct%rho_r(1)%pw,rho_struct%rho_g(1)%pw,&
-                            ks_env%v_rspace(1)%pw,&
-                            energy%exc,qs_env%dft_control)
-         energy%exc = rho_struct%rho_r(1)%pw%pw_grid%dvol*energy%exc
+         CALL xc_calculate (rho_struct%rho_elec_r(1)%pw,&
+              rho_struct%rho_g(1)%pw,&
+              v_rspace_new(1)%pw,&
+              energy%exc,qs_env%dft_control)
+         energy%exc = rho_struct%rho_elec_r(1)%pw%pw_grid%dvol*energy%exc
       ELSEIF ( qs_env%dft_control%nspins == 2) THEN
-         call stop_program(routineP,"NA")
+         CALL stop_program(routineP,"NA")
       ELSE
-         call stop_program(routineP,"nspins > 2")
+         CALL stop_program(routineP,"nspins > 2")
       END IF
 
     END IF
