@@ -426,9 +426,9 @@ contains
 
   subroutine build_kohn_sham_matrix(ks_env,qs_env,globenv,ks,p,p_old,rebuild,&
        nrebuild,ex,ec,ecore,ecore_overlap,&
-         ecore_self,ehartree,&
-         total_rho_gspace, total_rho_elec_rspace, etotal, &
-         total_rho_core_rspace, total_rho_rspace,error,calculate_forces)
+       ecore_self,ehartree,&
+       total_rho_gspace, total_rho_elec_rspace, etotal, &
+       total_rho_core_rspace, total_rho_rspace,error,calculate_forces,just_energy)
     type(qs_ks_env_type), intent(inout), target :: ks_env
     type(global_environment_type), intent(IN) :: globenv
     type(qs_environment_type), intent(INOUT)  :: qs_env
@@ -436,6 +436,7 @@ contains
     type(real_matrix_p_type), dimension(:), intent(in) :: p,p_old
     logical, intent(in) :: calculate_forces,rebuild
     integer, intent(in) :: nrebuild
+    logical, intent(in), optional :: just_energy
     real(kind=wp), intent(out), optional :: ex,ec,ecore,ecore_overlap,&
          ecore_self,ehartree,&
          total_rho_gspace, total_rho_elec_rspace, etotal, &
@@ -449,7 +450,7 @@ contains
     character(len=*), parameter :: routineN='build_kohn_sham_matrix',&
          routineP=moduleN//':'//routineN
     integer :: handle,output_unit, nelectron
-    logical :: ionode, failure
+    logical :: ionode, failure, energy_only
     type(real_matrix_p_type), DIMENSION(:), pointer :: h
     type(dft_control_type), pointer :: dft_control
     failure=.false.
@@ -459,6 +460,10 @@ contains
 
     ionode = globenv%ionode
     output_unit = globenv%scr
+    energy_only = .false.
+    IF (present(just_energy)) THEN
+       energy_only = just_energy
+    END IF
 
     call get_qs_env(qs_env=qs_env,&
                     h=h,&
@@ -535,42 +540,47 @@ contains
                "Exchange-correlation energy:                   ",ks_env%ex + ks_env%ec
        end if
 
-       call coeff_transform_space(ks_env%work_gspace,ks_env%work_rspace)
+       if (.not. energy_only) then
+
+         call coeff_transform_space(ks_env%work_gspace,ks_env%work_rspace)
 
 ! work_rspace is the hartee potential in rspace
 
-       ks_env%work_rspace%pw%cr3d(:,:,:) =&
-         ks_env%work_rspace%pw%pw_grid%dvol*&
-         ks_env%work_rspace%pw%cr3d(:,:,:)
+         ks_env%work_rspace%pw%cr3d(:,:,:) =&
+           ks_env%work_rspace%pw%pw_grid%dvol*&
+           ks_env%work_rspace%pw%cr3d(:,:,:)
 
-       IF (calculate_forces) THEN
-         CALL integrate_v_core_rspace(ks_env%work_rspace,ks_env%cube_info(1),&
-                                      ks_env%l_info,qs_env)
-       END IF
+         IF (calculate_forces) THEN
+           CALL integrate_v_core_rspace(ks_env%work_rspace,ks_env%cube_info(1),&
+                                        ks_env%l_info,qs_env)
+         END IF
 
-       ks_env%v_rspace(1)%pw%cr3d(:,:,:) =&
-         ks_env%v_rspace(1)%pw%pw_grid%dvol*&
-         ks_env%v_rspace(1)%pw%cr3d(:,:,:) +&
-         ks_env%work_rspace%pw%cr3d(:,:,:)
+         ks_env%v_rspace(1)%pw%cr3d(:,:,:) =&
+           ks_env%v_rspace(1)%pw%pw_grid%dvol*&
+           ks_env%v_rspace(1)%pw%cr3d(:,:,:) +&
+           ks_env%work_rspace%pw%cr3d(:,:,:)
 
-       if (nrebuild == 1) then
-          call transfer_matrix(h(1)%matrix,ks(1)%matrix)
-          call integrate_v_rspace(ks_env%v_rspace,ks_env%v_gspace,&
-               ks_env%gridlevel_info,ks_env%v_rspace_old,&
-               ks_env%cube_info,ks_env%l_info,rebuild,p(1),ks(1),qs_env,&
-               globenv,calculate_forces)
-       else
-          if (rebuild) call set_matrix(ks_env%v%matrix,0.0_wp)
-          call integrate_v_rspace(ks_env%v_rspace,ks_env%v_gspace,&
-               ks_env%gridlevel_info,ks_env%v_rspace_old,&
-               ks_env%cube_info,ks_env%l_info,rebuild,p(1),ks_env%v,&
-               qs_env,globenv,calculate_forces)
-          call add_matrices(ks(1)%matrix,1.0_wp,h(1)%matrix,1.0_wp,ks_env%v%matrix)
+         if (nrebuild == 1) then
+            call transfer_matrix(h(1)%matrix,ks(1)%matrix)
+            call integrate_v_rspace(ks_env%v_rspace,ks_env%v_gspace,&
+                 ks_env%gridlevel_info,ks_env%v_rspace_old,&
+                 ks_env%cube_info,ks_env%l_info,rebuild,p(1),ks(1),qs_env,&
+                 globenv,calculate_forces)
+         else
+            if (rebuild) call set_matrix(ks_env%v%matrix,0.0_wp)
+            call integrate_v_rspace(ks_env%v_rspace,ks_env%v_gspace,&
+                 ks_env%gridlevel_info,ks_env%v_rspace_old,&
+                 ks_env%cube_info,ks_env%l_info,rebuild,p(1),ks_env%v,&
+                 qs_env,globenv,calculate_forces)
+            call add_matrices(ks(1)%matrix,1.0_wp,h(1)%matrix,1.0_wp,ks_env%v%matrix)
+         end if
+
        end if
 
 !   *** Keep a copy of the old density matrix ***
 
        call transfer_matrix(p(1)%matrix,p_old(1)%matrix)
+
     end if
 
 !MK All this optional arguments should disappear
