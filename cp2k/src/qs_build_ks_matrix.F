@@ -60,7 +60,6 @@ MODULE qs_build_ks_matrix
                                              cp_warning_level
   USE cube_utils,                      ONLY: cube_info_type
   USE dft_types,                       ONLY: dft_control_type
-  USE functionals,                     ONLY: init_functionals
   USE gaussian_gridlevels,             ONLY: gridlevel_info_type
   USE global_types,                    ONLY: DEBUG,&
                                              global_environment_type
@@ -92,8 +91,6 @@ MODULE qs_build_ks_matrix
                                              REALSPACE,&
                                              RECIPROCALSPACE,&
                                              pw_type
-  USE pws,                             ONLY: init_pw_poisson_solver,&
-                                             pw_poisson_solver
   USE qs_charges_types,                ONLY: qs_charges_type
   USE qs_collocate_density,            ONLY: calculate_rho_core,&
                                              calculate_rho_elec,&
@@ -238,7 +235,6 @@ CONTAINS
     NULLIFY( ks_env%v_rspace, ks_env%v, pw_env, auxbas_pw_pool)
 
     CALL timeset(routineN,"I","",handle)
-    CALL init_functionals()
     CALL get_qs_env(qs_env=qs_env,&
          dft_control=dft_control,atomic_kind_set=atomic_kind_set,&
          pw_env=pw_env, cell=cell)
@@ -267,16 +263,12 @@ CONTAINS
        END DO
        CALL pw_pool_init_coeff(auxbas_pw_pool,ks_env%v_hartree_rspace,&
             use_data=REALDATA3D, in_space=REALSPACE)
-       
-       CALL pw_green_fn_init(cell%green,auxbas_pw_pool%pw_grid)
-       
-       CALL init_pw_poisson_solver(cell%green)
     ELSE
-     ks_env%initialized=.FALSE.
-   END IF
+       ks_env%initialized=.FALSE.
+    END IF
 
-   CALL timestop(0.0_wp,handle)
-
+    CALL timestop(0.0_wp,handle)
+    
   END SUBROUTINE qs_ks_init
 !***************************************************************************
 
@@ -502,15 +494,15 @@ CONTAINS
        IF (ionode.AND.globenv%print%total_densities) THEN
           WRITE (UNIT=output_unit,FMT="(/,(T3,A,T40,2F20.10))")&
                "Total electronic density (r-space): ",&
-               SUM(qs_charges%total_rho_elec_rspace),&
-               SUM(qs_charges%total_rho_elec_rspace) + &
+               SUM(rho%tot_rho_r),&
+               SUM(rho%tot_rho_r) + &
                REAL(ks_env%n_electrons,wp),&
                "Total core charge density (r-space):",&
                qs_charges%total_rho_core_rspace,&
                qs_charges%total_rho_core_rspace - REAL(ks_env%n_electrons,wp)
           WRITE (UNIT=output_unit,FMT="(T3,A,T60,F20.10)")&
                "Total charge density (r-space):     ",&
-               SUM(qs_charges%total_rho_elec_rspace)+&
+               SUM(rho%tot_rho_r)+&
                qs_charges%total_rho_core_rspace,&
                "Total charge density (g-space):     ",&
                qs_charges%total_rho_gspace
@@ -669,7 +661,7 @@ SUBROUTINE qs_ks_update_qs_env(ks_env,qs_env, global_env,&
         CALL get_qs_env(qs_env,k=ks,p=p,rho=rho,energy=energy,&
              qs_charges=qs_charges)
         CALL qs_rho_update_rho(rho, rho_ao_new=p,qs_env=qs_env,&
-             rebuild=r_build, qs_charges=qs_charges,energy=energy,&
+             rebuild=r_build,energy=energy,&
              error=error)
         CALL qs_ks_build_kohn_sham_matrix(ks_env,qs_env=qs_env,&
              globenv=global_env,ks=ks,&
