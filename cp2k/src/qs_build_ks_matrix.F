@@ -58,7 +58,10 @@ module qs_build_ks_matrix
   use pws,                      only: init_pw_poisson_solver,&
        pw_poisson_solver
   use greens_fn,                only: pw_green_fn_init
+!JH
   use functionals
+  use xc,                       only: xc_calculate
+!JH
   use gaussian_gridlevels,      only: gridlevel_info_type,&
        init_gaussian_gridlevel,& 
        destroy_gaussian_gridlevel
@@ -145,7 +148,6 @@ module qs_build_ks_matrix
      real(kind=wp) :: total_rho_core_rspace, total_rho_rspace, total_rho_gspace
      type(coeff_type), dimension(:), pointer       :: rho_gspace,rho_rspace,&
           rho_rspace_old,v_gspace,v_rspace
-!JH  type(coeff_type)          :: drho_rspace,vxcg_rspace
      type(coeff_type)          :: v_rspace_old,work_gspace,work_rspace
      type(gridlevel_info_type) :: gridlevel_info
      type(l_info_type)         :: l_info
@@ -580,15 +582,13 @@ contains
             ks_env%work_gspace)
 
        energy%total = energy%core_overlap + energy%core_self + &
-            energy%core + energy%hartree + energy%exchange + energy%correlation
+            energy%core + energy%hartree + energy%exc
 
        if (ionode.and.globenv%print%scf_energies) then
           write (UNIT=output_unit,FMT="(/,(T3,A,T60,F20.10))")&
-               "Core Hamiltonian energy:                       ",energy%core,&
-               "Hartree energy:                                ",&
-               energy%hartree,&
-               "Exchange-correlation energy:                   ",&
-               energy%exchange + energy%correlation
+            "Core Hamiltonian energy:                       ",energy%core,&
+            "Hartree energy:                                ",energy%hartree,&
+            "Exchange-correlation energy:                   ",energy%exc
        end if
 
        if (.not. just_energy) then
@@ -780,7 +780,7 @@ subroutine qs_ks_did_change(ks_env,qs_env,global_env,s_struct_changed,p_changed,
 end subroutine qs_ks_did_change
 !***************************************************************************
 
-!!****f* cp_log_handling/calculate_xc_potential [1.0] *
+!!****f* qs_build_ks_matrix/calculate_xc_potential [1.0] *
 !!
 !!   NAME
 !!     calculate_xc_potential
@@ -814,14 +814,11 @@ end subroutine qs_ks_did_change
 
 !   *** Local variables ***
 
-    integer :: handle,kg
-
-    integer :: local_planes,local_offset
+    integer :: handle
 
     integer, dimension(3) :: ng
 
     real(wp), dimension(:,:,:), pointer :: drho,rho,vxc,vxcg
-    character(len=60):: x_fun, c_fun, xc_fun
     type(dft_control_type), pointer :: dft_control
 
     TYPE(qs_energy_type), POINTER :: energy
@@ -835,87 +832,22 @@ end subroutine qs_ks_did_change
     call get_qs_env(qs_env=qs_env,&
                     dft_control=dft_control,&
                     energy=energy)
-!JH x_fun = dft_control%exchange_functional
-!JH c_fun = dft_control%correlation_functional
-!JH xc_fun = dft_control%functional
 
+!old
+if(0==0) then
     ng(:) = ks_env%rho_rspace(1)%pw%pw_grid%npts(3)
-
     rho => ks_env%rho_rspace(1)%pw%cr3d(:,:,:)
     vxc => ks_env%v_rspace(1)%pw%cr3d(:,:,:)
-
-!JH if (dft_control%gradient_functional) then
-!JH    drho => ks_env%drho_rspace%pw%cr3d(:,:,:)
-!JH    vxcg => ks_env%vxcg_rspace%pw%cr3d(:,:,:)
-!JH end if
-
     ex = 0.0_wp
     ec = 0.0_wp
-
-!JH CALL mp_range(globenv%mepos,globenv%num_pe,ng(3),local_offset,local_planes)
-
-!JH DO kg=local_offset+1,local_offset+local_planes
-
-!JH   *** Exchange functionals ***
-
-!JH select case (trim(x_fun))
-!JH case ("Becke88")
-!JH    call becke88(rho(:,:,kg),drho(:,:,kg),ex,vxc(:,:,kg),vxcg(:,:,kg))
-!JH case ("PBE")
-!JH    call pbe_x(rho(:,:,kg),drho(:,:,kg),ex,vxc(:,:,kg),vxcg(:,:,kg))
-!JH case ("Perdew86")
-!JH    call perdew86_x(rho(:,:,kg),drho(:,:,kg),ex,vxc(:,:,kg),vxcg(:,:,kg))
-!JH case ("Slater")
-!JH    call slater(rho(:,:,kg),ex,vxc(:,:,kg))
-!JH case ("VWN")
-!JH     CALL vwn_x(rho(:,:,kg),ex,vxc(:,:,kg))
-!JH    call vwn_x(rho(:,:,:),ex,vxc(:,:,:))
-!JH end select
-
-!JH   *** Correlation functionals ***
-
-!JH select case (trim(c_fun))
-!JH case ("LYP")
-!JH    call lyp(rho(:,:,kg),drho(:,:,kg),ec,vxc(:,:,kg),vxcg(:,:,kg))
-!JH case ("PBE")
-!JH    call pbe_c(rho(:,:,kg),drho(:,:,kg),ec,vxc(:,:,kg),vxcg(:,:,kg))
-!JH case ("Perdew86")
-!JH    call perdew86_c(rho(:,:,kg),drho(:,:,kg),ec,vxc(:,:,kg),vxcg(:,:,kg))
-!JH case ("VWN")
-!JH     CALL vwn_c(rho(:,:,kg),ec,vxc(:,:,kg))
-!JH    call vwn_c(rho(:,:,:),ec,vxc(:,:,:))
-!JH end select
-
-!JH   *** Combined exchange-correlation functionals ***
-
-!JH select case (trim(xc_fun))
-!JH case ("HCTH/93")
-!JH    call hcth(93,rho(:,:,kg),drho(:,:,kg),ex,vxc(:,:,kg),vxcg(:,:,kg))
-!JH case ("HCTH/120")
-!JH    call hcth(120,rho(:,:,kg),drho(:,:,kg),ex,vxc(:,:,kg),vxcg(:,:,kg))
-!JH case ("HCTH/147")
-!JH    call hcth(147,rho(:,:,kg),drho(:,:,kg),ex,vxc(:,:,kg),vxcg(:,:,kg))
-!JH case ("HCTH/407")
-!JH    call hcth(407,rho(:,:,kg),drho(:,:,kg),ex,vxc(:,:,kg),vxcg(:,:,kg))
-!JH case ("Pade")
-!JH     CALL pade(rho(:,:,kg),ex,vxc(:,:,kg))
-       call pade(rho(:,:,:),ex,vxc(:,:,:))
-!JH end select
-
-!JH END DO
-
-!JH CALL mp_allgather(globenv%mepos,globenv%num_pe,ng(3),vxc,globenv%group)
-
-!JH if (dft_control%gradient_functional) call & 
-!JH      mp_allgather(globenv%mepos,globenv%num_pe,ng(3),vxcg,globenv%group)
-
+    call pade(rho(:,:,:),ex,vxc(:,:,:))
     call mp_sum(ex,globenv%group)
     call mp_sum(ec,globenv%group)
-
-    energy%exchange = ks_env%rho_rspace(1)%pw%pw_grid%dvol*ex
-    energy%correlation = ks_env%rho_rspace(1)%pw%pw_grid%dvol*ec
-
-!JH IF (gradient_functional) CALL calculate_nabla_vxcg(globenv)
+    energy%exc = ks_env%rho_rspace(1)%pw%pw_grid%dvol*(ex+ec)
+else
+!old
+!   call xc_calculate ()
+endif
 
     call timestop(0.0_wp,handle)
 
@@ -924,3 +856,5 @@ end subroutine qs_ks_did_change
 ! *****************************************************************************
 
 end module qs_build_ks_matrix
+
+! *****************************************************************************
