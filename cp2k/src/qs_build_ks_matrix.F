@@ -52,7 +52,7 @@ module qs_build_ks_matrix
   use pw_types,                 only: COMPLEXDATA1D,COMPLEXDATA3D,&
        REALDATA3D,REALSPACE,&
        RECIPROCALSPACE,&
-       pw_fft_wrap,pw_type
+       pw_type
   use pws,                      only: init_pw_poisson_solver,&
        pw_poisson_solver
   use greens_fn,                only: pw_green_fn_init
@@ -144,8 +144,8 @@ module qs_build_ks_matrix
      logical :: initialized, s_changed
      type(coeff_type), dimension(:), pointer       :: rho_gspace,rho_rspace,&
           rho_rspace_old,v_gspace,v_rspace
-     type(coeff_type)          :: drho_rspace,v_rspace_old,vxcg_rspace,&
-          work_gspace,work_rspace
+!JH  type(coeff_type)          :: drho_rspace,vxcg_rspace
+     type(coeff_type)          :: v_rspace_old,work_gspace,work_rspace
      real(wp)          :: ex,ec,ecore,ecore_overlap,ecore_self,ehartree,&
           total_rho_gspace, total_rho_elec_rspace, etotal, &
           total_rho_core_rspace, total_rho_rspace
@@ -405,16 +405,16 @@ contains
     call coeff_allocate(ks_env%rho_core,pw_grid(1),COMPLEXDATA1D)
     ks_env%rho_core%pw%in_space = RECIPROCALSPACE
 
-    if (dft_control%gradient_functional) then
-       do i=1,3
-          call coeff_allocate(ks_env%nabla_rho_rspace(i),pw_grid(1),REALDATA3D)
-          ks_env%nabla_rho_rspace(i)%pw%in_space = REALSPACE
-       end do
-       call coeff_allocate(ks_env%drho_rspace,pw_grid(1),REALDATA3D)
-       ks_env%drho_rspace%pw%in_space = REALSPACE
-       call coeff_allocate(ks_env%vxcg_rspace,pw_grid(1),REALDATA3D)
-       ks_env%vxcg_rspace%pw%in_space = REALSPACE
-    end if
+!JH if (dft_control%gradient_functional) then
+!JH    do i=1,3
+!JH       call coeff_allocate(ks_env%nabla_rho_rspace(i),pw_grid(1),REALDATA3D)
+!JH       ks_env%nabla_rho_rspace(i)%pw%in_space = REALSPACE
+!JH    end do
+!JH    call coeff_allocate(ks_env%drho_rspace,pw_grid(1),REALDATA3D)
+!JH    ks_env%drho_rspace%pw%in_space = REALSPACE
+!JH    call coeff_allocate(ks_env%vxcg_rspace,pw_grid(1),REALDATA3D)
+!JH    ks_env%vxcg_rspace%pw%in_space = REALSPACE
+!JH end if
 
     call timestop(0.0_wp,handle)
 
@@ -488,9 +488,6 @@ contains
        call calculate_xc_potential(ks_env,qs_env=qs_env,&
             globenv=globenv)
 
-!CALL pw_fft_wrap(rho_rspace(1)%pw,rho_gspace(1)%pw,&
-!                 debug=(globenv%print%level == DEBUG))
-
 ! add the core density to the electronic density
        call coeff_sumup(ks_env%rho_core,ks_env%rho_gspace(1))
 
@@ -522,8 +519,7 @@ contains
                "Exchange-correlation energy:                   ",ks_env%ex + ks_env%ec
        end if
 
-       call pw_fft_wrap(ks_env%work_gspace%pw,ks_env%work_rspace%pw,&
-            debug=(globenv%print%level == DEBUG))
+       call coeff_transform_space(ks_env%work_gspace,ks_env%work_rspace)
 
 ! work_rspace is the hartee potential in rspace
        call integrate_v_core_rspace(ks_env%work_rspace,ks_env%cube_info(1),&
@@ -627,79 +623,79 @@ contains
     call timeset("calculate_xc_potential","I","",handle)
 
     call get_qs_env(qs_env, dft_control=dft_control)
-    x_fun = dft_control%exchange_functional
-    c_fun = dft_control%correlation_functional
-    xc_fun = dft_control%functional
+!JH x_fun = dft_control%exchange_functional
+!JH c_fun = dft_control%correlation_functional
+!JH xc_fun = dft_control%functional
 
     ng(:) = ks_env%rho_rspace(1)%pw%pw_grid%npts(3)
 
     rho => ks_env%rho_rspace(1)%pw%cr3d(:,:,:)
     vxc => ks_env%v_rspace(1)%pw%cr3d(:,:,:)
 
-    if (dft_control%gradient_functional) then
-       drho => ks_env%drho_rspace%pw%cr3d(:,:,:)
-       vxcg => ks_env%vxcg_rspace%pw%cr3d(:,:,:)
-    end if
+!JH if (dft_control%gradient_functional) then
+!JH    drho => ks_env%drho_rspace%pw%cr3d(:,:,:)
+!JH    vxcg => ks_env%vxcg_rspace%pw%cr3d(:,:,:)
+!JH end if
 
     ks_env%ex = 0.0_wp
     ks_env%ec = 0.0_wp
 
-!D  CALL mp_range(globenv%mepos,globenv%num_pe,ng(3),local_offset,local_planes)
+!JH CALL mp_range(globenv%mepos,globenv%num_pe,ng(3),local_offset,local_planes)
 
-!D  DO kg=local_offset+1,local_offset+local_planes
+!JH DO kg=local_offset+1,local_offset+local_planes
 
-!     *** Exchange functionals ***
+!JH   *** Exchange functionals ***
 
-    select case (trim(x_fun))
-    case ("Becke88")
-       call becke88(rho(:,:,kg),drho(:,:,kg),ks_env%ex,vxc(:,:,kg),vxcg(:,:,kg))
-    case ("PBE")
-       call pbe_x(rho(:,:,kg),drho(:,:,kg),ks_env%ex,vxc(:,:,kg),vxcg(:,:,kg))
-    case ("Perdew86")
-       call perdew86_x(rho(:,:,kg),drho(:,:,kg),ks_env%ex,vxc(:,:,kg),vxcg(:,:,kg))
-    case ("Slater")
-       call slater(rho(:,:,kg),ks_env%ex,vxc(:,:,kg))
-    case ("VWN")
-!D      CALL vwn_x(rho(:,:,kg),ks_env%ex,vxc(:,:,kg))
-       call vwn_x(rho(:,:,:),ks_env%ex,vxc(:,:,:))
-    end select
+!JH select case (trim(x_fun))
+!JH case ("Becke88")
+!JH    call becke88(rho(:,:,kg),drho(:,:,kg),ks_env%ex,vxc(:,:,kg),vxcg(:,:,kg))
+!JH case ("PBE")
+!JH    call pbe_x(rho(:,:,kg),drho(:,:,kg),ks_env%ex,vxc(:,:,kg),vxcg(:,:,kg))
+!JH case ("Perdew86")
+!JH    call perdew86_x(rho(:,:,kg),drho(:,:,kg),ks_env%ex,vxc(:,:,kg),vxcg(:,:,kg))
+!JH case ("Slater")
+!JH    call slater(rho(:,:,kg),ks_env%ex,vxc(:,:,kg))
+!JH case ("VWN")
+!JH     CALL vwn_x(rho(:,:,kg),ks_env%ex,vxc(:,:,kg))
+!JH    call vwn_x(rho(:,:,:),ks_env%ex,vxc(:,:,:))
+!JH end select
 
-!     *** Correlation functionals ***
+!JH   *** Correlation functionals ***
 
-    select case (trim(c_fun))
-    case ("LYP")
-       call lyp(rho(:,:,kg),drho(:,:,kg),ks_env%ec,vxc(:,:,kg),vxcg(:,:,kg))
-    case ("PBE")
-       call pbe_c(rho(:,:,kg),drho(:,:,kg),ks_env%ec,vxc(:,:,kg),vxcg(:,:,kg))
-    case ("Perdew86")
-       call perdew86_c(rho(:,:,kg),drho(:,:,kg),ks_env%ec,vxc(:,:,kg),vxcg(:,:,kg))
-    case ("VWN")
-!D      CALL vwn_c(rho(:,:,kg),ks_env%ec,vxc(:,:,kg))
-       call vwn_c(rho(:,:,:),ks_env%ec,vxc(:,:,:))
-    end select
+!JH select case (trim(c_fun))
+!JH case ("LYP")
+!JH    call lyp(rho(:,:,kg),drho(:,:,kg),ks_env%ec,vxc(:,:,kg),vxcg(:,:,kg))
+!JH case ("PBE")
+!JH    call pbe_c(rho(:,:,kg),drho(:,:,kg),ks_env%ec,vxc(:,:,kg),vxcg(:,:,kg))
+!JH case ("Perdew86")
+!JH    call perdew86_c(rho(:,:,kg),drho(:,:,kg),ks_env%ec,vxc(:,:,kg),vxcg(:,:,kg))
+!JH case ("VWN")
+!JH     CALL vwn_c(rho(:,:,kg),ks_env%ec,vxc(:,:,kg))
+!JH    call vwn_c(rho(:,:,:),ks_env%ec,vxc(:,:,:))
+!JH end select
 
-!     *** Combined exchange-correlation functionals ***
+!JH   *** Combined exchange-correlation functionals ***
 
-    select case (trim(xc_fun))
-    case ("HCTH/93")
-       call hcth(93,rho(:,:,kg),drho(:,:,kg),ks_env%ex,vxc(:,:,kg),vxcg(:,:,kg))
-    case ("HCTH/120")
-       call hcth(120,rho(:,:,kg),drho(:,:,kg),ks_env%ex,vxc(:,:,kg),vxcg(:,:,kg))
-    case ("HCTH/147")
-       call hcth(147,rho(:,:,kg),drho(:,:,kg),ks_env%ex,vxc(:,:,kg),vxcg(:,:,kg))
-    case ("HCTH/407")
-       call hcth(407,rho(:,:,kg),drho(:,:,kg),ks_env%ex,vxc(:,:,kg),vxcg(:,:,kg))
-    case ("Pade")
-!D      CALL pade(rho(:,:,kg),ks_env%ex,vxc(:,:,kg))
+!JH select case (trim(xc_fun))
+!JH case ("HCTH/93")
+!JH    call hcth(93,rho(:,:,kg),drho(:,:,kg),ks_env%ex,vxc(:,:,kg),vxcg(:,:,kg))
+!JH case ("HCTH/120")
+!JH    call hcth(120,rho(:,:,kg),drho(:,:,kg),ks_env%ex,vxc(:,:,kg),vxcg(:,:,kg))
+!JH case ("HCTH/147")
+!JH    call hcth(147,rho(:,:,kg),drho(:,:,kg),ks_env%ex,vxc(:,:,kg),vxcg(:,:,kg))
+!JH case ("HCTH/407")
+!JH    call hcth(407,rho(:,:,kg),drho(:,:,kg),ks_env%ex,vxc(:,:,kg),vxcg(:,:,kg))
+!JH case ("Pade")
+!JH     CALL pade(rho(:,:,kg),ks_env%ex,vxc(:,:,kg))
        call pade(rho(:,:,:),ks_env%ex,vxc(:,:,:))
-    end select
+!JH end select
 
-!D  END DO
+!JH END DO
 
-!D  CALL mp_allgather(globenv%mepos,globenv%num_pe,ng(3),vxc,globenv%group)
+!JH CALL mp_allgather(globenv%mepos,globenv%num_pe,ng(3),vxc,globenv%group)
 
-    if (dft_control%gradient_functional) call & 
-         mp_allgather(globenv%mepos,globenv%num_pe,ng(3),vxcg,globenv%group)
+!JH if (dft_control%gradient_functional) call & 
+!JH      mp_allgather(globenv%mepos,globenv%num_pe,ng(3),vxcg,globenv%group)
 
     call mp_sum(ks_env%ex,globenv%group)
     call mp_sum(ks_env%ec,globenv%group)
@@ -707,7 +703,7 @@ contains
     ks_env%ex = ks_env%rho_rspace(1)%pw%pw_grid%dvol*ks_env%ex
     ks_env%ec = ks_env%rho_rspace(1)%pw%pw_grid%dvol*ks_env%ec
 
-!MK IF (gradient_functional) CALL calculate_nabla_vxcg(globenv)
+!JH IF (gradient_functional) CALL calculate_nabla_vxcg(globenv)
 
     call timestop(0.0_wp,handle)
 
