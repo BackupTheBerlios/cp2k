@@ -27,6 +27,7 @@
 !!   SOURCE
 !****************************************************************************
 MODULE qs_build_ks_matrix
+
   USE atomic_kind_types,               ONLY: atomic_kind_type,&
                                              get_atomic_kind,&
                                              get_atomic_kind_set
@@ -130,6 +131,7 @@ MODULE qs_build_ks_matrix
   USE timings,                         ONLY: timeset,&
                                              timestop
   USE xc,                              ONLY: xc_calculate
+
   IMPLICIT NONE
 
   PRIVATE
@@ -555,6 +557,9 @@ CONTAINS
             l_info=pw_env%l_info,&
             total_rho=total_rho_elec_rspace,qs_env=qs_env,error=error)
 
+! has this to be done here???
+!deb   CALL qs_rho_did_change(my_rho,rho_r_valid=.TRUE.,error=error)
+       my_rho%rho_r_valid=.TRUE.
 ! to rm
 
        CALL coeff_zero(ks_env%v_rspace(1))
@@ -814,6 +819,7 @@ END SUBROUTINE qs_ks_did_change
 !!
 !!*** *********************************************************************
   SUBROUTINE calculate_xc_potential(ks_env,qs_env,globenv)
+    IMPLICIT NONE
     TYPE(qs_ks_env_type), INTENT(inout),TARGET :: ks_env
     TYPE(qs_environment_type), INTENT(in), TARGET :: qs_env
     TYPE(global_environment_type), INTENT(IN), TARGET :: globenv
@@ -824,38 +830,56 @@ END SUBROUTINE qs_ks_did_change
 
     INTEGER, DIMENSION(3) :: ng
 
-    REAL(wp), DIMENSION(:,:,:), POINTER :: drho,rho,vxc,vxcg
+    REAL(wp), DIMENSION(:,:,:), POINTER :: drho,rho,vxc
     TYPE(dft_control_type), POINTER :: dft_control
     TYPE(qs_rho_type), POINTER :: rho_struct
     TYPE(qs_energy_type), POINTER :: energy
+    TYPE(cp_error_type) :: error
 
     REAL(wp) :: ec,ex
+    LOGICAL :: failure
+    INTEGER :: i
+    CHARACTER(len=*), PARAMETER :: routineN='calculate_xc_potential',&
+         routineP=moduleN//':'//routineN
 
 !   ---------------------------------------------------------------------------
 
-    CALL timeset("calculate_xc_potential","I","",handle)
+    CALL timeset( routineN ,"I","",handle)
+
+    failure=.FALSE.
 
     CALL get_qs_env(qs_env=qs_env,&
                     dft_control=dft_control,&
                     rho=rho_struct,&
                     energy=energy)
 
-!old
-IF(0==0) THEN
-    ng(:) = rho_struct%rho_r(1)%pw%pw_grid%npts(3)
-    rho => rho_struct%rho_r(1)%pw%cr3d(:,:,:)
-    vxc => ks_env%v_rspace(1)%pw%cr3d(:,:,:)
-    ex = 0.0_wp
-    ec = 0.0_wp
-    CALL pade(rho(:,:,:),ex,vxc(:,:,:))
-    CALL mp_sum(ex,globenv%group)
-    CALL mp_sum(ec,globenv%group)
-    energy%exc = rho_struct%rho_r(1)%pw%pw_grid%dvol*(ex+ec)
-ELSE
-!
-!   call xc_calculate ()
-!
-ENDIF
+    ! test if the real space density is available
+    CPPrecondition(ASSOCIATED(rho_struct),cp_failure_level,routineP,error,failure)
+    CPPrecondition(rho_struct%ref_count>0,cp_failure_level,routineP,error,failure)
+    CPPrecondition(rho_struct%rho_r_valid,cp_failure_level,routineP,error,failure)
+    IF ( .NOT. failure ) THEN
+
+      ! for gradient corrected functional we need the density in g space
+      IF ( qs_env%dft_control%gradient_functional ) THEN
+         IF ( .NOT. rho_struct%rho_g_valid ) THEN
+            DO i=1,SIZE(rho_struct%rho_r)
+               call coeff_transform_space(rho_struct%rho_r(i),rho_struct%rho_g(i))
+            END DO
+         END IF
+      END IF
+
+      IF ( qs_env%dft_control%nspins == 1) THEN
+         call xc_calculate (rho_struct%rho_r(1)%pw,rho_struct%rho_g(1)%pw,&
+                            ks_env%v_rspace(1)%pw,&
+                            energy%exc,qs_env%dft_control)
+         energy%exc = rho_struct%rho_r(1)%pw%pw_grid%dvol*energy%exc
+      ELSEIF ( qs_env%dft_control%nspins == 2) THEN
+         call stop_program(routineP,"NA")
+      ELSE
+         call stop_program(routineP,"nspins > 2")
+      END IF
+
+    END IF
 
     CALL timestop(0.0_wp,handle)
 
