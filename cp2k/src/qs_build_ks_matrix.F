@@ -91,6 +91,8 @@ MODULE qs_build_ks_matrix
                                              REALSPACE,&
                                              RECIPROCALSPACE,&
                                              pw_type
+  USE pws,                             ONLY: cleanup_pw_poisson_solver,&
+                                             init_pw_poisson_solver
   USE qs_charges_types,                ONLY: qs_charges_type
   USE qs_collocate_density,            ONLY: calculate_rho_core,&
                                              calculate_rho_elec,&
@@ -191,6 +193,14 @@ CONTAINS
 !!   NAME
 !!     qs_ks_init
 !!
+!!   SYNOPSIS
+!!     Subroutine qs_ks_init(ks_env, qs_env, global_env, error)
+!!       Type(qs_ks_env_type), Intent (OUT):: ks_env
+!!       Type(qs_environment_type), Intent (IN), Target:: qs_env
+!!       Type(global_environment_type), Intent (IN), Target:: global_env
+!!       Type(cp_error_type), Optional, Intent (INOUT):: error
+!!     End Subroutine qs_ks_init
+!!
 !!   FUNCTION
 !!     initializes the given ks_env.
 !!
@@ -232,7 +242,8 @@ CONTAINS
     TYPE(cell_type), POINTER :: cell
 
     failure=.FALSE.
-    NULLIFY( ks_env%v_rspace, ks_env%v, pw_env, auxbas_pw_pool)
+    NULLIFY( ks_env%v_rspace, ks_env%v, pw_env, auxbas_pw_pool,&
+         pw_env, cell)
 
     CALL timeset(routineN,"I","",handle)
     CALL get_qs_env(qs_env=qs_env,&
@@ -276,6 +287,12 @@ CONTAINS
 !!
 !!   NAME
 !!     qs_ks_dealloc_ref
+!!
+!!   SYNOPSIS
+!!     Subroutine qs_ks_dealloc_ref(ks_env, error)
+!!       Type(qs_ks_env_type), Intent (INOUT):: ks_env
+!!       Type(cp_error_type), Optional, Intent (INOUT):: error
+!!     End Subroutine qs_ks_dealloc_ref
 !!
 !!   FUNCTION
 !!     releases the memory used by the ks_env (but not ks_env)
@@ -332,45 +349,45 @@ CONTAINS
 
 !***************************************************************************
 
-  !!****f* qs_build_ks_matrix/qs_ks_build_kohn_sham_matrix [1.0] *
-  !!
-  !!   NAME
-  !!     qs_ks_build_kohn_sham_matrix
-  !!
-  !!   FUNCTION
-  !!     private routine where the real calculations are made: the
-  !!     KS matrix is calculated
-  !!
-  !!   NOTES
-  !!     make rho, energy and qs_charges optional, defaulting
-  !!     to qs_env components?
-  !!
-  !!   INPUTS
-  !!     - ks_env: the ks_env that old all the temporary objects that
-  !!       the calculation of the KS matrix needs
-  !!     - qs_env: the qs_env to update
-  !!     - global_env: the global environment
-  !!     - rebuild: if true builds again the potential
-  !!     - calculate_forces: if true calculate the quantities needed
-  !!       to calculate the forces. Defaults to false.
-  !!     - just_energy: if true updates the energies but not the
-  !!       ks matrix. Defaults to false
-  !!     - ks: the KS matrix that is created
-  !!     - rho: the density, must be up to date
-  !!     - energy: the place where energies are stored
-  !!     - qs_charges: the place where the grids charges are stored
-  !!     - error: variable to control error logging, stopping,... 
-  !!       see module cp_error_handling 
-  !!
-  !!   AUTHOR
-  !!     Matthias Krack
-  !!
-  !!   MODIFICATION HISTORY
-  !!     06.2002 moved from qs_scf to qs_build_ks_matrix, use of ks_env
-  !!             new did_change scheme [fawzi]
-  !!     10.2002 introduced pools, uses updated rho as input, LSD [fawzi]
-  !!
-  !!*** *********************************************************************
+!!****f* qs_build_ks_matrix/qs_ks_build_kohn_sham_matrix [1.0] *
+!!
+!!   NAME
+!!     qs_ks_build_kohn_sham_matrix
+!!
+!!   FUNCTION
+!!     private routine where the real calculations are made: the
+!!     KS matrix is calculated
+!!
+!!   NOTES
+!!     make rho, energy and qs_charges optional, defaulting
+!!     to qs_env components?
+!!
+!!   INPUTS
+!!     - ks_env: the ks_env that old all the temporary objects that
+!!       the calculation of the KS matrix needs
+!!     - qs_env: the qs_env to update
+!!     - global_env: the global environment
+!!     - rebuild: if true builds again the potential
+!!     - calculate_forces: if true calculate the quantities needed
+!!       to calculate the forces. Defaults to false.
+!!     - just_energy: if true updates the energies but not the
+!!       ks matrix. Defaults to false
+!!     - ks: the KS matrix that is created
+!!     - rho: the density, must be up to date
+!!     - energy: the place where energies are stored
+!!     - qs_charges: the place where the grids charges are stored
+!!     - error: variable to control error logging, stopping,... 
+!!       see module cp_error_handling 
+!!
+!!   AUTHOR
+!!     Matthias Krack
+!!
+!!   MODIFICATION HISTORY
+!!     06.2002 moved from qs_scf to qs_build_ks_matrix, use of ks_env
+!!             new did_change scheme [fawzi]
+!!     10.2002 introduced pools, uses updated rho as input, LSD [fawzi]
+!!
+!!*** *********************************************************************
   SUBROUTINE qs_ks_build_kohn_sham_matrix(ks_env,qs_env,globenv,ks,&
        rho,energy,qs_charges,rebuild,calculate_forces,just_energy,error)
     TYPE(qs_ks_env_type), INTENT(inout), TARGET :: ks_env
@@ -397,6 +414,7 @@ CONTAINS
     TYPE(pw_pool_type), POINTER :: auxbas_pw_pool
     TYPE(pw_env_type), POINTER :: pw_env
     TYPE(coeff_type), POINTER :: rho_core
+    TYPE(cell_type), POINTER :: cell
 
     TYPE(coeff_type), DIMENSION(:), ALLOCATABLE   :: v_rspace_new
     TYPE(coeff_type)                              :: v_hartree_gspace,&
@@ -407,7 +425,7 @@ CONTAINS
     failure=.FALSE.
     r_build=rebuild
     NULLIFY(h,s,dft_control,atomic_kind_set,auxbas_pw_pool, pw_pools,&
-         pw_env, mgrid_rspace, mgrid_gspace)
+         pw_env,rho_core,cell, mgrid_rspace, mgrid_gspace)
     !   -----------------------------------------------------------------------
 
     CALL timeset(routineN,"I","",handle)
@@ -422,6 +440,7 @@ CONTAINS
                     h=h,&
                     s=s,&
                     pw_env=pw_env,&
+                    cell=cell,&
                     rho_core=rho_core)
 
     nspins=dft_control%nspins
@@ -508,8 +527,10 @@ CONTAINS
                qs_charges%total_rho_gspace
        END IF
 
+       CALL init_pw_poisson_solver(cell%green,error=error)
        CALL calculate_hartree(rho_tot_gspace,energy%hartree,&
             v_hartree_gspace)
+       CALL cleanup_pw_poisson_solver(cell%green,error=error)
 
        CALL pw_pool_give_back_coeff(auxbas_pw_pool,rho_tot_gspace,&
             error=error)
@@ -603,6 +624,17 @@ CONTAINS
 !!   NAME
 !!     qs_ks_update_qs_env
 !!
+!!   SYNOPSIS
+!!     Subroutine qs_ks_update_qs_env(ks_env, qs_env, global_env, rebuild,&
+!!         calculate_forces, just_energy, error)
+!!       Type(qs_ks_env_type), Intent (INOUT):: ks_env
+!!       Type(qs_environment_type), Intent (INOUT), Target:: qs_env
+!!       Type(global_environment_type), Intent (IN), Target:: global_env
+!!       Logical, Intent (IN), Optional:: rebuild, calculate_forces,&
+!!         just_energy
+!!       Type(cp_error_type), Optional, Intent (INOUT):: error
+!!     End Subroutine qs_ks_update_qs_env
+!!
 !!   FUNCTION
 !!     updates the Kohn Sham matrix of the given qs_env (facility method)
 !!
@@ -692,6 +724,17 @@ END SUBROUTINE qs_ks_update_qs_env
 !!
 !!   NAME
 !!     qs_ks_did_change
+!!
+!!   SYNOPSIS
+!!     Subroutine qs_ks_did_change(ks_env, qs_env, global_env,&
+!!         s_mstruct_changed, p_changed, full_reset, error)
+!!       Type(qs_ks_env_type), Intent (INOUT):: ks_env
+!!       Type(qs_environment_type), Intent (INOUT), Target:: qs_env
+!!       Type(global_environment_type), Intent (IN), Target:: global_env
+!!       Logical, Intent (IN), Optional:: s_mstruct_changed, p_changed,&
+!!         full_reset
+!!       Type(cp_error_type), Optional, Intent (INOUT):: error
+!!     End Subroutine qs_ks_did_change
 !!
 !!   FUNCTION
 !!     tells that some of the things relevant to the ks calculation
