@@ -6,7 +6,7 @@
 !!   NAME
 !!     qs_conductivity
 !!   CVS id
-!!   $Id: qs_conductivity.F,v 1.7 2003/08/07 09:55:09 vondele Exp $
+!!   $Id: qs_conductivity.F,v 1.8 2003/08/07 12:26:54 vondele Exp $
 !!
 !!   FUNCTION
 !! 
@@ -22,8 +22,8 @@
 
 MODULE qs_conductivity
 ! *****************************************************************************
-  USE cp_fm_basic_linalg,              ONLY: cp_fm_gemm,&
-                                             cp_sm_fm_multiply
+  USE cp_fm_basic_linalg,              ONLY: cp_fm_gemm
+  USE cp_sm_fm_interactions,           ONLY: cp_sm_fm_multiply
   USE cp_fm_struct,                    ONLY: cp_fm_struct_create,&
                                              cp_fm_struct_release,&
                                              cp_fm_struct_type
