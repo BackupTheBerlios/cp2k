@@ -232,6 +232,9 @@ contains
     type(dft_control_type), pointer :: dft_control
     type(real_matrix_p_type), DIMENSION(:), pointer :: h
     type(atomic_kind_type), dimension(:), pointer :: atomic_kind_set
+
+    IF (ks_env%initialized) RETURN
+
     failure=.false.
 
     nullify(ks_env%rho_elec_rspace, ks_env%rho_gspace, &
