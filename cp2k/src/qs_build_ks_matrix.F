@@ -5,10 +5,10 @@
 
 #include "cp_prep_globals.h"
 
-!!****h* cp2k/qs_build_KS_matrix [1.0] *
+!!****h* cp2k/qs_build_ks_matrix [1.0] *
 !!
 !!   NAME
-!!     qs_build_KS_matrix
+!!     qs_build_ks_matrix
 !!
 !!   FUNCTION
 !!     routines that build the Kohn-Sham matrix (i.e calculate the coulomb
@@ -25,7 +25,7 @@
 !!
 !!   SOURCE
 !****************************************************************************
-module qs_build_KS_matrix
+module qs_build_ks_matrix
   use cp_log_handling, only: cp_fatal_level, cp_failure_level,&
        cp_warning_level, cp_note_level, cp_to_string
   use cp_error_handling, only: cp_debug, cp_error_type, cp_error_init,&
@@ -109,14 +109,14 @@ module qs_build_KS_matrix
   private
 
   logical, private, parameter :: debug_this_module=.true.
-  character(len=*), private, parameter :: moduleN='qs_build_KS_matrix'
+  character(len=*), private, parameter :: moduleN='qs_build_ks_matrix'
 
   public :: qs_ks_env_type
   public :: qs_ks_init, qs_ks_dealloc_ref, build_kohn_sham_matrix
 !***
 !****************************************************************************
 
-!!****s* qs_build_KS_matrix/qs_ks_env_type [1.0] *
+!!****s* qs_build_ks_matrix/qs_ks_env_type [1.0] *
 !!
 !!   NAME
 !!     qs_ks_env_type
@@ -162,7 +162,7 @@ module qs_build_KS_matrix
 
 contains
 
-!!****f* qs_build_KS_matrix/qs_ks_init [1.0] *
+!!****f* qs_build_ks_matrix/qs_ks_init [1.0] *
 !!
 !!   NAME
 !!     qs_ks_init
@@ -246,7 +246,7 @@ contains
   end subroutine qs_ks_init
 !***************************************************************************
 
-!!****f* qs_build_KS_matrix/qs_ks_dealloc_ref [1.0] *
+!!****f* qs_build_ks_matrix/qs_ks_dealloc_ref [1.0] *
 !!
 !!   NAME
 !!     qs_ks_dealloc_ref
@@ -601,7 +601,7 @@ contains
 !!       instead of summed. 
 !!       This scales significantly better (e.g. factor 3 on 12 cpus
 !!       32 H2O) [Joost VdV]
-!!     - moved to qs_build_KS_matrix [fawzi]
+!!     - moved to qs_build_ks_matrix [fawzi]
 !!
 !!*** *********************************************************************
   subroutine calculate_xc_potential(ks_env,qs_env,globenv, ec, ex)
@@ -723,4 +723,4 @@ contains
 ! *****************************************************************************
 
 
-end module qs_build_KS_matrix
+end module qs_build_ks_matrix
