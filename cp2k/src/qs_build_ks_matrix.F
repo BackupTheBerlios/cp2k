@@ -146,15 +146,18 @@ module qs_build_ks_matrix
      logical :: initialized, s_struct_changed, p_changed, forces_up_to_date
      integer :: n_evals, n_electrons
      real(kind=wp) :: total_rho_core_rspace, total_rho_rspace, total_rho_gspace
-     type(coeff_type), dimension(:), pointer       :: rho_gspace,rho_rspace,&
-          rho_rspace_old,v_gspace,v_rspace
-     type(coeff_type)          :: v_rspace_old,work_gspace,work_rspace
+
+     ! rho_elec_rspace is supposed to contain the electron density (for cube output)
+     type(coeff_type), dimension(:), pointer       :: rho_gspace,rho_elec_rspace,&
+          rho_elec_rspace_old,v_gspace,v_rspace
+     ! hartree is supposed to contain the hartree potential (for cube ouput)
+     type(coeff_type)          :: v_rspace_old,v_hartree_rspace
      type(gridlevel_info_type) :: gridlevel_info
      type(l_info_type)         :: l_info
      type(real_matrix_p_type)  :: v
      type(cube_info_type), dimension(:), pointer :: cube_info
      type(coeff_type)          :: rho_core
-     type(coeff_type), dimension(3) :: nabla_rho_rspace
+     type(coeff_type), dimension(3) :: nabla_rho_elec_rspace
   end type qs_ks_env_type
 !!***
 !****************************************************************************
@@ -205,7 +208,7 @@ contains
     type(atomic_kind_type), dimension(:), pointer :: atomic_kind_set
     failure=.false.
 
-    nullify(ks_env%rho_rspace, ks_env%rho_gspace, ks_env%rho_rspace_old,&
+    nullify(ks_env%rho_elec_rspace, ks_env%rho_gspace, ks_env%rho_elec_rspace_old,&
          ks_env%v_gspace, ks_env%v_rspace, ks_env%cube_info,&
          ks_env%v%matrix)
 
@@ -228,9 +231,9 @@ contains
 
     cmax = 0
     do igrid_level=1,ngrid_level
-       maxradius = maxgridpoints*maxval(ks_env%rho_rspace(igrid_level)%pw%pw_grid%dr)
+       maxradius = maxgridpoints*maxval(ks_env%rho_elec_rspace(igrid_level)%pw%pw_grid%dr)
        call init_cube_info(ks_env%cube_info(igrid_level),&
-            ks_env%rho_rspace(igrid_level)%pw%pw_grid%dr(:),&
+            ks_env%rho_elec_rspace(igrid_level)%pw%pw_grid%dr(:),&
             maxradius,cmaxl)
        cmax = max(cmax,cmaxl)
     end do
@@ -344,8 +347,8 @@ contains
 
     allocate (ks_env%pw_grid(ngrid_level),STAT=istat)
     if (istat /= 0) call stop_memory(routineP,"pw_grid",0)
-    allocate (ks_env%rho_rspace(ngrid_level),STAT=istat)
-    if (istat /= 0) call stop_memory(routineP,"rho_rspace",0)
+    allocate (ks_env%rho_elec_rspace(ngrid_level),STAT=istat)
+    if (istat /= 0) call stop_memory(routineP,"rho_elec_rspace",0)
     allocate (ks_env%rho_gspace(ngrid_level),STAT=istat)
     if (istat /= 0) call stop_memory(routineP,"rho_gspace",0)
     allocate (ks_env%v_rspace(ngrid_level),STAT=istat)
@@ -353,8 +356,8 @@ contains
     allocate (ks_env%v_gspace(ngrid_level),STAT=istat)
     if (istat /= 0) call stop_memory(routineP,"v_gspace",0)
 
-    allocate (ks_env%rho_rspace_old(ngrid_level),STAT=istat)
-    if (istat /= 0) call stop_memory(routineP,"rho_rspace_old",0)
+    allocate (ks_env%rho_elec_rspace_old(ngrid_level),STAT=istat)
+    if (istat /= 0) call stop_memory(routineP,"rho_elec_rspace_old",0)
 
 !   *** Construct the various coeff_type grids ***
 
@@ -387,15 +390,15 @@ contains
          END IF
        END IF
 
-       call coeff_allocate(ks_env%rho_rspace(igrid_level),pw_grid(igrid_level),&
+       call coeff_allocate(ks_env%rho_elec_rspace(igrid_level),pw_grid(igrid_level),&
             REALDATA3D)
-       ks_env%rho_rspace(igrid_level)%pw%in_space = REALSPACE
+       ks_env%rho_elec_rspace(igrid_level)%pw%in_space = REALSPACE
        call coeff_allocate(ks_env%rho_gspace(igrid_level),pw_grid(igrid_level),&
             COMPLEXDATA1D)
        ks_env%rho_gspace(igrid_level)%pw%in_space = RECIPROCALSPACE
-       call coeff_allocate(ks_env%rho_rspace_old(igrid_level),pw_grid(igrid_level),&
+       call coeff_allocate(ks_env%rho_elec_rspace_old(igrid_level),pw_grid(igrid_level),&
             REALDATA3D)
-       ks_env%rho_rspace_old%pw%in_space = REALSPACE
+       ks_env%rho_elec_rspace_old%pw%in_space = REALSPACE
        call coeff_allocate(ks_env%v_rspace(igrid_level),pw_grid(igrid_level),&
             REALDATA3D)
        ks_env%v_rspace(igrid_level)%pw%in_space = REALSPACE
@@ -411,10 +414,8 @@ contains
 
     call init_pw_poisson_solver(cell%green)
 
-    call coeff_allocate(ks_env%work_rspace,pw_grid(1),REALDATA3D)
-    ks_env%work_rspace%pw%in_space = REALSPACE
-    call coeff_allocate(ks_env%work_gspace,pw_grid(1),COMPLEXDATA1D)
-    ks_env%work_gspace%pw%in_space = RECIPROCALSPACE
+    call coeff_allocate(ks_env%v_hartree_rspace,pw_grid(1),REALDATA3D)
+    ks_env%v_hartree_rspace%pw%in_space = REALSPACE
     call coeff_allocate(ks_env%v_rspace_old,pw_grid(1),REALDATA3D)
     ks_env%v_rspace_old%pw%in_space = REALSPACE
     call coeff_allocate(ks_env%rho_core,pw_grid(1),COMPLEXDATA1D)
@@ -422,11 +423,11 @@ contains
 
 !JH if (dft_control%gradient_functional) then
 !JH    do i=1,3
-!JH       call coeff_allocate(ks_env%nabla_rho_rspace(i),pw_grid(1),REALDATA3D)
-!JH       ks_env%nabla_rho_rspace(i)%pw%in_space = REALSPACE
+!JH       call coeff_allocate(ks_env%nabla_rho_elec_rspace(i),pw_grid(1),REALDATA3D)
+!JH       ks_env%nabla_rho_elec_rspace(i)%pw%in_space = REALSPACE
 !JH    end do
-!JH    call coeff_allocate(ks_env%drho_rspace,pw_grid(1),REALDATA3D)
-!JH    ks_env%drho_rspace%pw%in_space = REALSPACE
+!JH    call coeff_allocate(ks_env%drho_elec_rspace,pw_grid(1),REALDATA3D)
+!JH    ks_env%drho_elec_rspace%pw%in_space = REALSPACE
 !JH    call coeff_allocate(ks_env%vxcg_rspace,pw_grid(1),REALDATA3D)
 !JH    ks_env%vxcg_rspace%pw%in_space = REALSPACE
 !JH end if
@@ -539,8 +540,8 @@ contains
                             globenv)
 
        call calculate_rho_elec(p(1)%matrix,p_old(1)%matrix,r_build,&
-            ks_env%rho_rspace,&
-            ks_env%rho_rspace_old,&
+            ks_env%rho_elec_rspace,&
+            ks_env%rho_elec_rspace_old,&
             ks_env%rho_gspace,ks_env%gridlevel_info,ks_env%cube_info,&
             ks_env%l_info,&
             total_rho_elec_rspace,qs_env,globenv)
@@ -580,7 +581,7 @@ contains
        end if
 
        call calculate_hartree(ks_env%rho_gspace(1),energy%hartree,&
-            ks_env%work_gspace)
+            ks_env%v_gspace(1))
 
        energy%total = energy%core_overlap + energy%core_self + &
             energy%core + energy%hartree + energy%exc
@@ -594,16 +595,14 @@ contains
 
        if (.not. just_energy) then
 
-          call coeff_transform_space(ks_env%work_gspace,ks_env%work_rspace)
+          call coeff_transform_space(ks_env%v_gspace(1),ks_env%v_hartree_rspace)
 
-          ! work_rspace is the hartree potential in rspace
-
-          ks_env%work_rspace%pw%cr3d(:,:,:) =&
-               ks_env%work_rspace%pw%pw_grid%dvol*&
-               ks_env%work_rspace%pw%cr3d(:,:,:)
+          ks_env%v_hartree_rspace%pw%cr3d(:,:,:) =&
+               ks_env%v_hartree_rspace%pw%pw_grid%dvol*&
+               ks_env%v_hartree_rspace%pw%cr3d(:,:,:)
 
           IF (calculate_forces) THEN
-             CALL integrate_v_core_rspace(ks_env%work_rspace,&
+             CALL integrate_v_core_rspace(ks_env%v_hartree_rspace,&
                   ks_env%cube_info(1),&
                   ks_env%l_info,qs_env)
           END IF
@@ -611,7 +610,7 @@ contains
           ks_env%v_rspace(1)%pw%cr3d(:,:,:) =&
                ks_env%v_rspace(1)%pw%pw_grid%dvol*&
                ks_env%v_rspace(1)%pw%cr3d(:,:,:) +&
-               ks_env%work_rspace%pw%cr3d(:,:,:)
+               ks_env%v_hartree_rspace%pw%cr3d(:,:,:)
 
           if (r_build) call set_matrix(ks_env%v%matrix,0.0_wp)
           call integrate_v_rspace(ks_env%v_rspace,ks_env%v_gspace,&
@@ -836,15 +835,15 @@ end subroutine qs_ks_did_change
 
 !old
 if(0==0) then
-    ng(:) = ks_env%rho_rspace(1)%pw%pw_grid%npts(3)
-    rho => ks_env%rho_rspace(1)%pw%cr3d(:,:,:)
+    ng(:) = ks_env%rho_elec_rspace(1)%pw%pw_grid%npts(3)
+    rho => ks_env%rho_elec_rspace(1)%pw%cr3d(:,:,:)
     vxc => ks_env%v_rspace(1)%pw%cr3d(:,:,:)
     ex = 0.0_wp
     ec = 0.0_wp
     call pade(rho(:,:,:),ex,vxc(:,:,:))
     call mp_sum(ex,globenv%group)
     call mp_sum(ec,globenv%group)
-    energy%exc = ks_env%rho_rspace(1)%pw%pw_grid%dvol*(ex+ec)
+    energy%exc = ks_env%rho_elec_rspace(1)%pw%pw_grid%dvol*(ex+ec)
 else
 !old
 !   call xc_calculate ()
