@@ -538,7 +538,8 @@ contains
        CALL calculate_ecore(h(1)%matrix,p(1)%matrix,s(1)%matrix,energy%core,&
                             globenv)
 
-       call calculate_rho_elec(p(1),p_old(1),r_build,ks_env%rho_rspace,&
+       call calculate_rho_elec(p(1)%matrix,p_old(1)%matrix,r_build,&
+            ks_env%rho_rspace,&
             ks_env%rho_rspace_old,&
             ks_env%rho_gspace,ks_env%gridlevel_info,ks_env%cube_info,&
             ks_env%l_info,&
