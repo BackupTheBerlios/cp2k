@@ -167,10 +167,8 @@ SUBROUTINE distribution_2D_retain(distribution_2D,error)
 
    CHARACTER(len=*), PARAMETER :: routineN='distribution_2D_retain',&
                                   routineP=moduleN//':'//routineN
-   LOGICAL :: failure
-   failure=.FALSE.
-   CPPrecondition(ASSOCIATED(distribution_2D),cp_failure_level,routineP,error,failure)
-   IF (.NOT. failure ) THEN
+
+   IF (ASSOCIATED(distribution_2D)) THEN
       distribution_2D%ref_count=distribution_2D%ref_count+1
    ENDIF
 END SUBROUTINE distribution_2D_retain
