@@ -102,6 +102,10 @@ MODULE qs_build_ks_matrix
                                              set_qs_env
   USE qs_integrate_potential,          ONLY: integrate_v_core_rspace,&
                                              integrate_v_rspace
+  USE qs_ks_types,                     ONLY: qs_ks_env_p_type,&
+                                             qs_ks_env_type,&
+                                             qs_ks_release,&
+                                             qs_ks_retain
   USE qs_overlap,                      ONLY: write_blacs_matrix,&
                                              write_sparse_matrix
   USE qs_rho_methods,                  ONLY: qs_rho_update_rho
@@ -133,74 +137,28 @@ MODULE qs_build_ks_matrix
 
   LOGICAL, PARAMETER :: debug_this_module=.TRUE.
   CHARACTER(len=*), PARAMETER :: moduleN='qs_build_ks_matrix'
+  INTEGER, SAVE, PRIVATE :: last_ks_id_nr=0
 
-  PUBLIC :: qs_ks_env_type
-  PUBLIC :: qs_ks_init, qs_ks_dealloc_ref, qs_ks_did_change,&
+  PUBLIC :: qs_ks_create, qs_ks_did_change,&
        qs_ks_update_qs_env
 !***
 !****************************************************************************
 
-!!****s* qs_build_ks_matrix/qs_ks_env_type [1.0] *
-!!
-!!   NAME
-!!     qs_ks_env_type
-!!
-!!   FUNCTION
-!!     calculation environement to calculate the ks matrix,
-!!     holds all the needed vars.
-!!     assumes that the core hamiltonian and energy are up to date.
-!!
-!!   NOTES
-!!     -
-!!
-!!   ATTRIBUTES
-!!     -
-!!
-!!   AUTHOR
-!!     Fawzi Mohamed
-!!
-!!   MODIFICATION HISTORY
-!!     04.2002 created [fawzi]
-!!     10.2002 introduced pools, uses updated rho as input,
-!!             removed most temporary variables, renamed may vars,
-!!             began conversion to LSD [fawzi]
-!!
-!!   SOURCE
-!***************************************************************************
-  TYPE qs_ks_env_type
-     LOGICAL :: initialized, &
-                s_mstruct_changed, &
-                p_changed, &
-                forces_up_to_date
-     INTEGER :: n_evals, &
-                n_electrons
-
-     ! hartree is supposed to contain the hartree potential (for cube ouput)
-     ! ugly to keep it always around only for a cube output...
-     TYPE(coeff_type) :: v_hartree_rspace
-     TYPE(coeff_type), DIMENSION(:), POINTER :: v_rspace
-
-     TYPE(real_matrix_p_type), DIMENSION(:), POINTER :: v
-  END TYPE qs_ks_env_type
-!!***
-!****************************************************************************
-
 CONTAINS
-
-!!****f* qs_build_ks_matrix/qs_ks_init [1.0] *
+!!****f* qs_build_ks_matrix/qs_ks_create [1.0] *
 !!
 !!   NAME
-!!     qs_ks_init
+!!     qs_ks_create
 !!
 !!   SYNOPSIS
-!!     Subroutine qs_ks_init(ks_env, qs_env, error)
-!!       Type(qs_ks_env_type), Intent (OUT):: ks_env
+!!     Subroutine qs_ks_create(ks_env, qs_env, error)
+!!       Type(qs_ks_env_type), Pointer:: ks_env
 !!       Type(qs_environment_type), Intent (IN), Target:: qs_env
 !!       Type(cp_error_type), Optional, Intent (INOUT):: error
-!!     End Subroutine qs_ks_init
+!!     End Subroutine qs_ks_create
 !!
 !!   FUNCTION
-!!     initializes the given ks_env.
+!!     allocates and initializes the given ks_env.
 !!
 !!   NOTES
 !!     -
@@ -218,13 +176,13 @@ CONTAINS
 !!     05.2002 created [fawzi]
 !!
 !!*** **********************************************************************
-  SUBROUTINE qs_ks_init(ks_env, qs_env, error)
-    TYPE(qs_ks_env_type), INTENT(out) :: ks_env
+  SUBROUTINE qs_ks_create(ks_env, qs_env, error)
+    TYPE(qs_ks_env_type),POINTER :: ks_env
     TYPE(qs_environment_type), INTENT(in),TARGET :: qs_env
     TYPE(cp_error_type), OPTIONAL, INTENT(inout) :: error
 
     INTEGER, PARAMETER :: maxgridpoints = 100
-    CHARACTER(len=*), PARAMETER :: routineN='qs_ks_init',&
+    CHARACTER(len=*), PARAMETER :: routineN='qs_ks_create',&
          routineP=moduleN//':'//routineN
     LOGICAL :: failure
     REAL(wp)          :: rel_cutoff,maxradius
@@ -237,32 +195,39 @@ CONTAINS
     TYPE(pw_env_type), POINTER :: pw_env
     TYPE(cell_type), POINTER :: cell
 
-    failure=.FALSE.
-    NULLIFY( ks_env%v_rspace, ks_env%v, pw_env, auxbas_pw_pool,&
-         pw_env, cell)
-
     CALL timeset(routineN,"I","",handle)
-    CALL get_qs_env(qs_env=qs_env,&
-         dft_control=dft_control,atomic_kind_set=atomic_kind_set,&
-         pw_env=pw_env, cell=cell)
-    CALL pw_env_get(pw_env,auxbas_pw_pool=auxbas_pw_pool)
 
-    rel_cutoff = dft_control%qs_control%relative_cutoff
-    cutoff => dft_control%qs_control%e_cutoff
-    nspins=dft_control%nspins
-
-    CALL get_atomic_kind_set(atomic_kind_set=atomic_kind_set,&
-         maxl=maxl, nelectron=ks_env%n_electrons)
-    ks_env%n_electrons=ks_env%n_electrons-dft_control%charge
-
-    ks_env%s_mstruct_changed=.TRUE.
-    ks_env%p_changed=.TRUE.
-    ks_env%forces_up_to_date=.FALSE.
-    ks_env%n_evals=0
-    ks_env%initialized=.TRUE.
-
-    ALLOCATE(ks_env%v_rspace(nspins),stat=stat)
+    failure=.FALSE.
+    ALLOCATE(ks_env, stat=stat)
     CPPostcondition(stat==0,cp_failure_level,routineP,error,failure)
+
+    IF (.not.failure) THEN
+       NULLIFY( ks_env%v_rspace, ks_env%v, pw_env, auxbas_pw_pool,&
+            pw_env, cell)
+       CALL get_qs_env(qs_env=qs_env,&
+            dft_control=dft_control,atomic_kind_set=atomic_kind_set,&
+            pw_env=pw_env, cell=cell)
+       CALL pw_env_get(pw_env,auxbas_pw_pool=auxbas_pw_pool)
+
+       rel_cutoff = dft_control%qs_control%relative_cutoff
+       cutoff => dft_control%qs_control%e_cutoff
+       nspins=dft_control%nspins
+
+       CALL get_atomic_kind_set(atomic_kind_set=atomic_kind_set,&
+            maxl=maxl, nelectron=ks_env%n_electrons)
+       ks_env%n_electrons=ks_env%n_electrons-dft_control%charge
+
+       ks_env%s_mstruct_changed=.TRUE.
+       ks_env%p_changed=.TRUE.
+       ks_env%forces_up_to_date=.FALSE.
+       ks_env%n_evals=0
+       ks_env%ref_count=1
+       last_ks_id_nr=last_ks_id_nr+1
+       ks_env%id_nr=last_ks_id_nr
+
+       ALLOCATE(ks_env%v_rspace(nspins),stat=stat)
+       CPPostcondition(stat==0,cp_failure_level,routineP,error,failure)
+    END IF
     IF (.NOT.failure) THEN
        DO ispin=1,nspins
           CALL pw_pool_init_coeff(auxbas_pw_pool,ks_env%v_rspace(ispin),&
@@ -270,79 +235,11 @@ CONTAINS
        END DO
        CALL pw_pool_init_coeff(auxbas_pw_pool,ks_env%v_hartree_rspace,&
             use_data=REALDATA3D, in_space=REALSPACE)
-    ELSE
-       ks_env%initialized=.FALSE.
     END IF
 
     CALL timestop(0.0_wp,handle)
-    
-  END SUBROUTINE qs_ks_init
-!***************************************************************************
 
-!!****f* qs_build_ks_matrix/qs_ks_dealloc_ref [1.0] *
-!!
-!!   NAME
-!!     qs_ks_dealloc_ref
-!!
-!!   SYNOPSIS
-!!     Subroutine qs_ks_dealloc_ref(ks_env, error)
-!!       Type(qs_ks_env_type), Intent (INOUT):: ks_env
-!!       Type(cp_error_type), Optional, Intent (INOUT):: error
-!!     End Subroutine qs_ks_dealloc_ref
-!!
-!!   FUNCTION
-!!     releases the memory used by the ks_env (but not ks_env)
-!!
-!!   NOTES
-!!     -
-!!
-!!   INPUTS
-!!     - ks_env: the ks_env to be released
-!!     - error: variable to control error logging, stopping,... 
-!!       see module cp_error_handling 
-!!
-!!   AUTHOR
-!!     Fawzi Mohamed
-!!
-!!   MODIFICATION HISTORY
-!!     05.2002 created [fawzi]
-!!
-!!*** **********************************************************************
-  SUBROUTINE qs_ks_dealloc_ref(ks_env,error)
-    TYPE(qs_ks_env_type), INTENT(inout) :: ks_env
-    TYPE(cp_error_type), OPTIONAL, INTENT(inout) :: error
-
-    LOGICAL :: failure
-    CHARACTER(len=*), PARAMETER :: routineN='qs_ks_dealloc_ref',&
-         routineP=moduleN//':'//routineN
-    INTEGER :: stat, ispin
-    failure=.FALSE.
-
-    CPPrecondition(ks_env%initialized,cp_failure_level,routineP,error,failure)
-    IF (.NOT. failure) THEN
-       ! try to give back the grids?
-       CALL coeff_deallocate(ks_env%v_hartree_rspace)
-       IF (ASSOCIATED(ks_env%v_rspace)) THEN
-          DO ispin=1,SIZE(ks_env%v_rspace)
-             CALL coeff_deallocate(ks_env%v_rspace(ispin))
-          END DO
-          DEALLOCATE(ks_env%v_rspace,stat=stat)
-          CPPostconditionNoFail(stat==0,cp_warning_level,routineP,error)
-       END IF
-       IF (ASSOCIATED(ks_env%v)) THEN
-          DO ispin=1,SIZE(ks_env%v)
-             IF (ASSOCIATED(ks_env%v(ispin)%matrix)) THEN
-                CALL deallocate_matrix(ks_env%v(ispin)%matrix)
-             END IF
-          END DO
-          DEALLOCATE(ks_env%v, stat=stat)
-          CPPostconditionNoFail(stat==0,cp_warning_level,routineP,error)
-       END IF
-       
-       ks_env%initialized=.FALSE.
-    END IF
-  END SUBROUTINE qs_ks_dealloc_ref
-
+  END SUBROUTINE qs_ks_create
 !***************************************************************************
 
 !!****f* qs_build_ks_matrix/qs_ks_build_kohn_sham_matrix [1.0] *
@@ -385,7 +282,7 @@ CONTAINS
 !!*** *********************************************************************
   SUBROUTINE qs_ks_build_kohn_sham_matrix(ks_env,qs_env,ks,&
        rho,energy,qs_charges,rebuild,calculate_forces,just_energy,error)
-    TYPE(qs_ks_env_type), INTENT(inout), TARGET :: ks_env
+    TYPE(qs_ks_env_type), POINTER :: ks_env
     TYPE(qs_environment_type), INTENT(INOUT)  :: qs_env
     TYPE(real_matrix_p_type), DIMENSION(:), INTENT(inout) :: ks
     TYPE(qs_rho_type), POINTER :: rho
@@ -425,7 +322,8 @@ CONTAINS
 
     CALL timeset(routineN,"I","",handle)
 
-    CPPrecondition(ks_env%initialized,cp_failure_level,routineP,error,failure)
+    CPPrecondition(ASSOCIATED(ks_env),cp_failure_level,routineP,error,failure)
+    CPPrecondition(ks_env%ref_count>0,cp_failure_level,routineP,error,failure)
 
     logger => cp_error_get_logger(error)
     ionode = logger%para_env%mepos==logger%para_env%source
@@ -540,8 +438,7 @@ CONTAINS
           CALL coeff_zero(v_rspace_new(ispin))
        END DO
 
-       CALL calculate_xc_potential(ks_env=ks_env,&
-            qs_env=qs_env,&
+       CALL calculate_xc_potential(qs_env=qs_env,&
             v_rspace_new=v_rspace_new,&
             error=error)
 
@@ -623,7 +520,7 @@ CONTAINS
 !!   SYNOPSIS
 !!     Subroutine qs_ks_update_qs_env(ks_env, qs_env, rebuild,&
 !!         calculate_forces, just_energy, error)
-!!       Type(qs_ks_env_type), Intent (INOUT):: ks_env
+!!       Type(qs_ks_env_type), Pointer:: ks_env
 !!       Type(qs_environment_type), Intent (INOUT), Target:: qs_env
 !!       Logical, Intent (IN), Optional:: rebuild, calculate_forces,&
 !!         just_energy
@@ -657,7 +554,7 @@ CONTAINS
 !!*** **********************************************************************
 SUBROUTINE qs_ks_update_qs_env(ks_env,qs_env,&
      rebuild,calculate_forces, just_energy, error)
-  TYPE(qs_ks_env_type), INTENT(inout) :: ks_env
+  TYPE(qs_ks_env_type), POINTER :: ks_env
   TYPE(qs_environment_type), INTENT(inout), TARGET :: qs_env
   LOGICAL, INTENT(in), OPTIONAL :: rebuild, calculate_forces, just_energy
   TYPE(cp_error_type), OPTIONAL, INTENT(inout) :: error
@@ -670,6 +567,7 @@ SUBROUTINE qs_ks_update_qs_env(ks_env,qs_env,&
   TYPE(qs_charges_type), POINTER :: qs_charges
   TYPE(cp_logger_type), POINTER :: logger
   TYPE(qs_rho_type), POINTER :: rho
+
   failure=.FALSE.
   did_update=.FALSE.
   logger => cp_error_get_logger(error)
@@ -678,7 +576,9 @@ SUBROUTINE qs_ks_update_qs_env(ks_env,qs_env,&
   IF (PRESENT(calculate_forces)) c_forces=calculate_forces
   IF (PRESENT(rebuild)) r_build=rebuild
 
-  CPPrecondition(ks_env%initialized,cp_failure_level,routineP,error,failure)
+  CPPrecondition(ASSOCIATED(ks_env),cp_failure_level,routineP,error,failure)
+  CPPrecondition(ks_env%ref_count>0,cp_failure_level,routineP,error,failure)
+
   IF (.NOT. failure) THEN
      IF (ks_env%p_changed .OR. ks_env%s_mstruct_changed .OR.&
           (c_forces.AND..NOT.ks_env%forces_up_to_date)) THEN
@@ -721,7 +621,7 @@ END SUBROUTINE qs_ks_update_qs_env
 !!   SYNOPSIS
 !!     Subroutine qs_ks_did_change(ks_env, qs_env, s_mstruct_changed,&
 !!         p_changed, full_reset, error)
-!!       Type(qs_ks_env_type), Intent (INOUT):: ks_env
+!!       Type(qs_ks_env_type), Pointer:: ks_env
 !!       Type(qs_environment_type), Intent (INOUT), Target:: qs_env
 !!       Logical, Intent (IN), Optional:: s_mstruct_changed, p_changed,&
 !!         full_reset
@@ -756,7 +656,7 @@ END SUBROUTINE qs_ks_update_qs_env
 !!*** **********************************************************************
 SUBROUTINE qs_ks_did_change(ks_env,qs_env,s_mstruct_changed,&
      p_changed,full_reset,error)
-  TYPE(qs_ks_env_type), INTENT(inout) :: ks_env
+  TYPE(qs_ks_env_type), POINTER :: ks_env
   TYPE(qs_environment_type), INTENT(inout), TARGET :: qs_env
   LOGICAL, INTENT(in), OPTIONAL :: s_mstruct_changed, p_changed, full_reset
   TYPE(cp_error_type), OPTIONAL, INTENT(inout) :: error
@@ -766,7 +666,8 @@ SUBROUTINE qs_ks_did_change(ks_env,qs_env,s_mstruct_changed,&
         routineP=moduleN//':'//routineN
   failure=.FALSE.
   
-  CPPrecondition(ks_env%initialized,cp_failure_level,routineP,error,failure)
+  CPPrecondition(ASSOCIATED(ks_env),cp_failure_level,routineP,error,failure)
+  CPPrecondition(ks_env%ref_count>0,cp_failure_level,routineP,error,failure)
   IF (.NOT. failure) THEN
      IF (PRESENT(p_changed)) THEN
         IF (p_changed) ks_env%p_changed=.TRUE.
@@ -812,9 +713,8 @@ END SUBROUTINE qs_ks_did_change
 !!     - moved to qs_build_ks_matrix [fawzi]
 !!
 !!*** *********************************************************************
-  SUBROUTINE calculate_xc_potential(ks_env,v_rspace_new,qs_env,error)
+  SUBROUTINE calculate_xc_potential(v_rspace_new,qs_env,error)
     IMPLICIT NONE
-    TYPE(qs_ks_env_type), INTENT(inout),TARGET    :: ks_env !FM remove ?
     TYPE(qs_environment_type), INTENT(in), TARGET :: qs_env
     TYPE(coeff_type), DIMENSION(:), INTENT(inout) :: v_rspace_new
     TYPE(cp_error_type), INTENT(inout), OPTIONAL  :: error
