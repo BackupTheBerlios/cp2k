@@ -104,7 +104,6 @@ module qs_build_ks_matrix
   use qs_integrate_potential,   only: integrate_v_rspace, &
        integrate_v_core_rspace
   use termination, only: stop_memory, stop_program
-  use qs_energy_types, only : qs_energy_type
   implicit none
   private
 
@@ -143,7 +142,7 @@ module qs_build_ks_matrix
 !***************************************************************************
   type qs_ks_env_type
      type(pw_grid_type), dimension(:), pointer :: pw_grid
-     logical :: initialized, s_struct_changed, p_changed, forces_up_to_date
+     logical :: initialized, s_mstruct_changed, forces_up_to_date, p_changed
      integer :: n_evals, n_electrons
      real(kind=wp) :: total_rho_core_rspace, total_rho_rspace, total_rho_gspace
 
@@ -248,7 +247,7 @@ contains
     ks_env%total_rho_core_rspace=-1.0
     ks_env%total_rho_rspace=-1.0
     ks_env%total_rho_gspace=-1.0
-    ks_env%s_struct_changed=.true.
+    ks_env%s_mstruct_changed=.true.
     ks_env%p_changed=.true.
     ks_env%forces_up_to_date=.false.
     ks_env%n_evals=0
@@ -520,7 +519,7 @@ contains
     CPPrecondition(size(p_old)>0,cp_failure_level,routineP,error,failure)
 
     if (.not.failure) then
-       if (ks_env%s_struct_changed) then
+       if (ks_env%s_mstruct_changed) then
           ! update qs_env%k structure?
           
           if (associated(ks_env%v%matrix)) then
@@ -533,7 +532,7 @@ contains
           CALL calculate_rho_core(ks_env%rho_core,ks_env%cube_info(1),&
                ks_env%l_info,&
                ks_env%total_rho_core_rspace,qs_env,globenv)
-          ks_env%s_struct_changed=.false.
+          ks_env%s_mstruct_changed=.false.
        end if
 
        CALL calculate_ecore(h(1)%matrix,p(1)%matrix,s(1)%matrix,energy%core,&
@@ -682,7 +681,7 @@ subroutine qs_ks_update_qs_env(ks_env,qs_env, global_env,&
 
   CPPrecondition(ks_env%initialized,cp_failure_level,routineP,error,failure)
   if (.not. failure) then
-     if (ks_env%p_changed .or. ks_env%s_struct_changed .or.&
+     if (ks_env%p_changed .or. ks_env%s_mstruct_changed .or.&
           (c_forces.and..not.ks_env%forces_up_to_date)) then
         did_update=.true.
         call get_qs_env(qs_env,k=ks,p=p,p_old=p_old,energy=energy)
@@ -697,7 +696,7 @@ subroutine qs_ks_update_qs_env(ks_env,qs_env, global_env,&
         
         if(.not.energy_only) then
            ks_env%p_changed=.false.
-           ks_env%s_struct_changed=.false.
+           ks_env%s_mstruct_changed=.false.
            ks_env%forces_up_to_date=.not.c_forces
         end if
      end if
@@ -731,7 +730,7 @@ end subroutine qs_ks_update_qs_env
 !!     - ks_env: the environement that is informed about the changes
 !!     - qs_env: the qs_environement
 !!     - global_env: the global environment
-!!     - s_struct_changed: if true it means that the structure of the
+!!     - s_mstruct_changed: if true it means that the structure of the
 !!       overlap matrix has changed
 !!       (atoms have moved)
 !!     - p_changed: if true it means that the density has changed
@@ -746,12 +745,12 @@ end subroutine qs_ks_update_qs_env
 !!     4.2002 created [fawzi]
 !!
 !!*** **********************************************************************
-subroutine qs_ks_did_change(ks_env,qs_env,global_env,s_struct_changed,p_changed,&
-     full_reset,error)
+subroutine qs_ks_did_change(ks_env,qs_env,global_env,s_mstruct_changed,&
+     p_changed,full_reset,error)
   type(qs_ks_env_type), intent(inout) :: ks_env
   type(qs_environment_type), intent(inout), target :: qs_env
   type(global_environment_type), intent(in), target :: global_env
-  logical, intent(in), optional :: s_struct_changed, p_changed, full_reset
+  logical, intent(in), optional :: s_mstruct_changed, p_changed, full_reset
   type(cp_error_type), optional, intent(inout) :: error
   
   logical :: failure
@@ -764,16 +763,14 @@ subroutine qs_ks_did_change(ks_env,qs_env,global_env,s_struct_changed,p_changed,
      if (present(p_changed)) then
         if (p_changed) ks_env%p_changed=.true.
      end if
-     if (present(s_struct_changed)) then
-        if (s_struct_changed) then
-           ks_env%p_changed=.true.
-           ks_env%s_struct_changed=.true.
+     if (present(s_mstruct_changed)) then
+        if (s_mstruct_changed) then
+           ks_env%s_mstruct_changed=.true.
         end if
      end if
      if (present(full_reset)) then
         if (full_reset) then
-           ks_env%p_changed=.true.
-           ks_env%s_struct_changed=.true.
+           ks_env%s_mstruct_changed=.true.
         end if
      end if
   end if
