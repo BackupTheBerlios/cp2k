@@ -34,6 +34,7 @@ module qs_build_ks_matrix
   use kinds, only: wp=>dp
   use global_types, only: global_environment_type,DEBUG
   use timings, only: timeset, timestop
+  USE qs_energy_types, ONLY: qs_energy_type
   use qs_environment_types, only: qs_environment_type, get_qs_env,&
        set_qs_env
   use coefficient_types,        only: coeff_allocate,&
@@ -443,6 +444,8 @@ contains
 
 !   *** Local variables ***
 
+    TYPE(qs_energy_type), POINTER :: energy
+
     character(len=*), parameter :: routineN='build_kohn_sham_matrix',&
          routineP=moduleN//':'//routineN
     integer :: handle,output_unit, nelectron
@@ -457,7 +460,11 @@ contains
     ionode = globenv%ionode
     output_unit = globenv%scr
 
-    call get_qs_env(qs_env,h=h,dft_control=dft_control, n_electrons=nelectron)
+    call get_qs_env(qs_env=qs_env,&
+                    h=h,&
+                    dft_control=dft_control,&
+                    energy=energy,&
+                    n_electrons=nelectron)
 
     CPPrecondition(associated(h),cp_failure_level,routineP,error,failure)
     CPPrecondition(size(ks)>0,cp_failure_level,routineP,error,failure)
@@ -465,7 +472,7 @@ contains
     CPPrecondition(size(p_old)>0,cp_failure_level,routineP,error,failure)
 
     if (.not.failure) then
-       call calculate_ecore(h(1)%matrix,p(1)%matrix,ks_env%ecore,globenv)
+       call calculate_ecore(h(1)%matrix,p(1)%matrix,energy%core,globenv)
 
        call calculate_rho_elec(p(1),p_old(1),rebuild,ks_env%rho_rspace,&
             ks_env%rho_rspace_old,&
@@ -485,8 +492,9 @@ contains
 !MK      CALL coeff_zero(vxcg_rspace)
        end if
 
-       call calculate_xc_potential(ks_env,qs_env=qs_env,&
-            globenv=globenv)
+       call calculate_xc_potential(ks_env=ks_env,&
+                                   qs_env=qs_env,&
+                                   globenv=globenv)
 
 ! add the core density to the electronic density
        call coeff_sumup(ks_env%rho_core,ks_env%rho_gspace(1))
@@ -506,11 +514,19 @@ contains
                "Total charge density (g-space):     ",ks_env%total_rho_gspace
        end if
 
-       call calculate_hartree(ks_env%rho_gspace(1),ks_env%ehartree,&
+       call calculate_hartree(ks_env%rho_gspace(1),energy%hartree,&
             ks_env%work_gspace)
 
+!MK energy entries should be removed from ks_env
+       ks_env%ecore = energy%core
+       ks_env%ecore_overlap = energy%core_overlap
+       ks_env%ecore_self = energy%core_self
+       ks_env%ehartree = energy%hartree
+       ks_env%ec = energy%correlation
+       ks_env%ex = energy%exchange
        ks_env%etotal = ks_env%ecore_overlap + ks_env%ecore_self + &
             ks_env%ecore + ks_env%ehartree + ks_env%ex + ks_env%ec
+       energy%total = ks_env%etotal
 
        if (ionode.and.globenv%print%scf_energies) then
           write (UNIT=output_unit,FMT="(/,(T3,A,T60,F20.10))")&
@@ -557,6 +573,7 @@ contains
        call transfer_matrix(p(1)%matrix,p_old(1)%matrix)
     end if
 
+!MK All this optional arguments should disappear
     if (present(ex)) ex=ks_env%ex
     if (present(ec)) ec=ks_env%ec
     if (present(ecore)) ecore=ks_env%ecore
@@ -603,11 +620,10 @@ contains
 !!     - moved to qs_build_ks_matrix [fawzi]
 !!
 !!*** *********************************************************************
-  subroutine calculate_xc_potential(ks_env,qs_env,globenv, ec, ex)
+  subroutine calculate_xc_potential(ks_env,qs_env,globenv)
     type(qs_ks_env_type), intent(inout),target :: ks_env
     type(qs_environment_type), intent(in), target :: qs_env
     type(global_environment_type), intent(IN), target :: globenv
-    real(kind=wp), intent(out), optional :: ec, ex
 
 !   *** Local variables ***
 
@@ -621,15 +637,17 @@ contains
     character(len=60):: x_fun, c_fun, xc_fun
     type(dft_control_type), pointer :: dft_control
 
+    TYPE(qs_energy_type), POINTER :: energy
 
-!
-!
+    REAL(wp) :: ec,ex
 
 !   ---------------------------------------------------------------------------
 
     call timeset("calculate_xc_potential","I","",handle)
 
-    call get_qs_env(qs_env, dft_control=dft_control)
+    call get_qs_env(qs_env=qs_env,&
+                    dft_control=dft_control,&
+                    energy=energy)
 !JH x_fun = dft_control%exchange_functional
 !JH c_fun = dft_control%correlation_functional
 !JH xc_fun = dft_control%functional
@@ -644,8 +662,8 @@ contains
 !JH    vxcg => ks_env%vxcg_rspace%pw%cr3d(:,:,:)
 !JH end if
 
-    ks_env%ex = 0.0_wp
-    ks_env%ec = 0.0_wp
+    ex = 0.0_wp
+    ec = 0.0_wp
 
 !JH CALL mp_range(globenv%mepos,globenv%num_pe,ng(3),local_offset,local_planes)
 
@@ -655,46 +673,46 @@ contains
 
 !JH select case (trim(x_fun))
 !JH case ("Becke88")
-!JH    call becke88(rho(:,:,kg),drho(:,:,kg),ks_env%ex,vxc(:,:,kg),vxcg(:,:,kg))
+!JH    call becke88(rho(:,:,kg),drho(:,:,kg),ex,vxc(:,:,kg),vxcg(:,:,kg))
 !JH case ("PBE")
-!JH    call pbe_x(rho(:,:,kg),drho(:,:,kg),ks_env%ex,vxc(:,:,kg),vxcg(:,:,kg))
+!JH    call pbe_x(rho(:,:,kg),drho(:,:,kg),ex,vxc(:,:,kg),vxcg(:,:,kg))
 !JH case ("Perdew86")
-!JH    call perdew86_x(rho(:,:,kg),drho(:,:,kg),ks_env%ex,vxc(:,:,kg),vxcg(:,:,kg))
+!JH    call perdew86_x(rho(:,:,kg),drho(:,:,kg),ex,vxc(:,:,kg),vxcg(:,:,kg))
 !JH case ("Slater")
-!JH    call slater(rho(:,:,kg),ks_env%ex,vxc(:,:,kg))
+!JH    call slater(rho(:,:,kg),ex,vxc(:,:,kg))
 !JH case ("VWN")
-!JH     CALL vwn_x(rho(:,:,kg),ks_env%ex,vxc(:,:,kg))
-!JH    call vwn_x(rho(:,:,:),ks_env%ex,vxc(:,:,:))
+!JH     CALL vwn_x(rho(:,:,kg),ex,vxc(:,:,kg))
+!JH    call vwn_x(rho(:,:,:),ex,vxc(:,:,:))
 !JH end select
 
 !JH   *** Correlation functionals ***
 
 !JH select case (trim(c_fun))
 !JH case ("LYP")
-!JH    call lyp(rho(:,:,kg),drho(:,:,kg),ks_env%ec,vxc(:,:,kg),vxcg(:,:,kg))
+!JH    call lyp(rho(:,:,kg),drho(:,:,kg),ec,vxc(:,:,kg),vxcg(:,:,kg))
 !JH case ("PBE")
-!JH    call pbe_c(rho(:,:,kg),drho(:,:,kg),ks_env%ec,vxc(:,:,kg),vxcg(:,:,kg))
+!JH    call pbe_c(rho(:,:,kg),drho(:,:,kg),ec,vxc(:,:,kg),vxcg(:,:,kg))
 !JH case ("Perdew86")
-!JH    call perdew86_c(rho(:,:,kg),drho(:,:,kg),ks_env%ec,vxc(:,:,kg),vxcg(:,:,kg))
+!JH    call perdew86_c(rho(:,:,kg),drho(:,:,kg),ec,vxc(:,:,kg),vxcg(:,:,kg))
 !JH case ("VWN")
-!JH     CALL vwn_c(rho(:,:,kg),ks_env%ec,vxc(:,:,kg))
-!JH    call vwn_c(rho(:,:,:),ks_env%ec,vxc(:,:,:))
+!JH     CALL vwn_c(rho(:,:,kg),ec,vxc(:,:,kg))
+!JH    call vwn_c(rho(:,:,:),ec,vxc(:,:,:))
 !JH end select
 
 !JH   *** Combined exchange-correlation functionals ***
 
 !JH select case (trim(xc_fun))
 !JH case ("HCTH/93")
-!JH    call hcth(93,rho(:,:,kg),drho(:,:,kg),ks_env%ex,vxc(:,:,kg),vxcg(:,:,kg))
+!JH    call hcth(93,rho(:,:,kg),drho(:,:,kg),ex,vxc(:,:,kg),vxcg(:,:,kg))
 !JH case ("HCTH/120")
-!JH    call hcth(120,rho(:,:,kg),drho(:,:,kg),ks_env%ex,vxc(:,:,kg),vxcg(:,:,kg))
+!JH    call hcth(120,rho(:,:,kg),drho(:,:,kg),ex,vxc(:,:,kg),vxcg(:,:,kg))
 !JH case ("HCTH/147")
-!JH    call hcth(147,rho(:,:,kg),drho(:,:,kg),ks_env%ex,vxc(:,:,kg),vxcg(:,:,kg))
+!JH    call hcth(147,rho(:,:,kg),drho(:,:,kg),ex,vxc(:,:,kg),vxcg(:,:,kg))
 !JH case ("HCTH/407")
-!JH    call hcth(407,rho(:,:,kg),drho(:,:,kg),ks_env%ex,vxc(:,:,kg),vxcg(:,:,kg))
+!JH    call hcth(407,rho(:,:,kg),drho(:,:,kg),ex,vxc(:,:,kg),vxcg(:,:,kg))
 !JH case ("Pade")
-!JH     CALL pade(rho(:,:,kg),ks_env%ex,vxc(:,:,kg))
-       call pade(rho(:,:,:),ks_env%ex,vxc(:,:,:))
+!JH     CALL pade(rho(:,:,kg),ex,vxc(:,:,kg))
+       call pade(rho(:,:,:),ex,vxc(:,:,:))
 !JH end select
 
 !JH END DO
@@ -704,22 +722,18 @@ contains
 !JH if (dft_control%gradient_functional) call & 
 !JH      mp_allgather(globenv%mepos,globenv%num_pe,ng(3),vxcg,globenv%group)
 
-    call mp_sum(ks_env%ex,globenv%group)
-    call mp_sum(ks_env%ec,globenv%group)
+    call mp_sum(ex,globenv%group)
+    call mp_sum(ec,globenv%group)
 
-    ks_env%ex = ks_env%rho_rspace(1)%pw%pw_grid%dvol*ks_env%ex
-    ks_env%ec = ks_env%rho_rspace(1)%pw%pw_grid%dvol*ks_env%ec
+    energy%exchange = ks_env%rho_rspace(1)%pw%pw_grid%dvol*ex
+    energy%correlation = ks_env%rho_rspace(1)%pw%pw_grid%dvol*ec
 
 !JH IF (gradient_functional) CALL calculate_nabla_vxcg(globenv)
 
     call timestop(0.0_wp,handle)
 
-    if (present(ec)) ec=ks_env%ec
-    if (present(ex)) ex=ks_env%ex
-
   end subroutine calculate_xc_potential
 
 ! *****************************************************************************
-
 
 end module qs_build_ks_matrix
