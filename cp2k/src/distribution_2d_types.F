@@ -5,10 +5,10 @@
 
 #include "cp_prep_globals.h"
 
-!!****h* distribution_2D_types [1.0] *
+!!****h* distribution_2d_types [1.0] *
 !!
 !!   NAME
-!!     distribution_2D_types
+!!     distribution_2d_types
 !!
 !!   FUNCTION
 !!     stores a mapping of 2D info (e.g. matrix) on a 
@@ -21,7 +21,7 @@
 !!   AUTHOR
 !!     Joost VandeVondele (2003-08)
 !!
-MODULE distribution_2D_types
+MODULE distribution_2d_types
   
   USE kinds,                           ONLY: int_size,&
                                              wp => dp,&
@@ -59,34 +59,34 @@ MODULE distribution_2D_types
   IMPLICIT NONE
   PRIVATE
 
-  CHARACTER(len=*), PRIVATE, PARAMETER :: moduleN='cp_distribution_2D_type'
+  CHARACTER(len=*), PRIVATE, PARAMETER :: moduleN='cp_distribution_2d_type'
 
-  TYPE distribution_2D_type
+  TYPE distribution_2d_type
     INTEGER, DIMENSION(:), POINTER       :: row_distribution
     INTEGER, DIMENSION(:), POINTER       :: col_distribution
     INTEGER, DIMENSION(:), POINTER       :: local_rows
     INTEGER, DIMENSION(:), POINTER       :: local_cols
     TYPE(cp_blacs_env_type), POINTER     :: blacs_env
     INTEGER                              :: ref_count
-  END TYPE distribution_2D_type
+  END TYPE distribution_2d_type
 
-  PUBLIC :: distribution_2D_type
+  PUBLIC :: distribution_2d_type
 
-  PUBLIC :: distribution_2D_create, &
-            distribution_2D_release, &
-            distribution_2D_retain
+  PUBLIC :: distribution_2d_create, &
+            distribution_2d_release, &
+            distribution_2d_retain
 
 CONTAINS
 
-!!****f* distribution_2D_types/distribution_2D_create [1.0] *
+!!****f* distribution_2d_types/distribution_2d_create [1.0] *
 !!
 !!   NAME
-!!     distribution_2D_create
+!!     distribution_2d_create
 !!
 !!   SYNOPSIS
 !!
 !!   FUNCTION
-!!     initializes the distribution_2D by retaining info and computing local info
+!!     initializes the distribution_2d by retaining info and computing local info
 !!
 !!   NOTES
 !!
@@ -98,13 +98,13 @@ CONTAINS
 !!   MODIFICATION HISTORY
 !!
 !!*** *********************************************************************
-SUBROUTINE distribution_2D_create(distribution_2D, row_distribution, col_distribution, blacs_env,error)
-   TYPE(distribution_2D_type), POINTER :: distribution_2D
+SUBROUTINE distribution_2d_create(distribution_2d, row_distribution, col_distribution, blacs_env,error)
+   TYPE(distribution_2d_type), POINTER :: distribution_2d
    INTEGER, DIMENSION(:), POINTER      :: row_distribution, col_distribution
    TYPE(cp_blacs_env_type), POINTER    :: blacs_env
    TYPE(cp_error_type), OPTIONAL, INTENT(inout) :: error
 
-   CHARACTER(len=*), PARAMETER :: routineN='distribution_2D_create',&
+   CHARACTER(len=*), PARAMETER :: routineN='distribution_2d_create',&
                                   routineP=moduleN//':'//routineN
 
    LOGICAL :: failure
@@ -114,38 +114,38 @@ SUBROUTINE distribution_2D_create(distribution_2D, row_distribution, col_distrib
    CPPrecondition(ASSOCIATED(row_distribution),cp_failure_level,routineP,error,failure)
    CPPrecondition(ASSOCIATED(col_distribution),cp_failure_level,routineP,error,failure)
    CPPrecondition(ASSOCIATED(blacs_env),cp_failure_level,routineP,error,failure)
-   CPPrecondition(.NOT.ASSOCIATED(distribution_2D),cp_failure_level,routineP,error,failure)
+   CPPrecondition(.NOT.ASSOCIATED(distribution_2d),cp_failure_level,routineP,error,failure)
 
    IF (.NOT. failure) THEN
-      ALLOCATE(distribution_2D,stat=istat)
+      ALLOCATE(distribution_2d,stat=istat)
       CPPostcondition(istat==0,cp_failure_level,routineP,error,failure)
       IF (.NOT. failure) THEN
-         distribution_2D%ref_count = 0
-         NULLIFY(distribution_2D%col_distribution)
-         NULLIFY(distribution_2D%row_distribution)
-         NULLIFY(distribution_2D%local_rows)
-         NULLIFY(distribution_2D%local_cols)
-         distribution_2D%blacs_env => blacs_env
-         CALL cp_blacs_env_retain(distribution_2D%blacs_env)
-         ALLOCATE(distribution_2D%row_distribution(SIZE(row_distribution)),stat=istat)
+         distribution_2d%ref_count = 0
+         NULLIFY(distribution_2d%col_distribution)
+         NULLIFY(distribution_2d%row_distribution)
+         NULLIFY(distribution_2d%local_rows)
+         NULLIFY(distribution_2d%local_cols)
+         distribution_2d%blacs_env => blacs_env
+         CALL cp_blacs_env_retain(distribution_2d%blacs_env)
+         ALLOCATE(distribution_2d%row_distribution(SIZE(row_distribution)),stat=istat)
          CPPostcondition(istat==0,cp_failure_level,routineP,error,failure)
-         ALLOCATE(distribution_2D%col_distribution(SIZE(col_distribution)),stat=istat)
+         ALLOCATE(distribution_2d%col_distribution(SIZE(col_distribution)),stat=istat)
          CPPostcondition(istat==0,cp_failure_level,routineP,error,failure)
          IF (.NOT. failure) THEN
-             distribution_2D%row_distribution=row_distribution
-             distribution_2D%col_distribution=col_distribution
+             distribution_2d%row_distribution=row_distribution
+             distribution_2d%col_distribution=col_distribution
          ENDIF ! failure
       ENDIF ! failure
    ENDIF ! failure
 
-   IF(.NOT. failure) distribution_2D%ref_count=1
+   IF(.NOT. failure) distribution_2d%ref_count=1
 
-END SUBROUTINE distribution_2D_create
+END SUBROUTINE distribution_2d_create
 
-!!****f* distribution_2D_types/distribution_2D_retain [1.0] *
+!!****f* distribution_2d_types/distribution_2d_retain [1.0] *
 !!
 !!   NAME
-!!     distribution_2D_retain
+!!     distribution_2d_retain
 !!
 !!   SYNOPSIS
 !!
@@ -161,22 +161,22 @@ END SUBROUTINE distribution_2D_create
 !!   MODIFICATION HISTORY
 !!
 !!*** *********************************************************************
-SUBROUTINE distribution_2D_retain(distribution_2D,error)
-   TYPE(distribution_2D_type), POINTER :: distribution_2D
+SUBROUTINE distribution_2d_retain(distribution_2d,error)
+   TYPE(distribution_2d_type), POINTER :: distribution_2d
    TYPE(cp_error_type), OPTIONAL, INTENT(inout) :: error
 
-   CHARACTER(len=*), PARAMETER :: routineN='distribution_2D_retain',&
+   CHARACTER(len=*), PARAMETER :: routineN='distribution_2d_retain',&
                                   routineP=moduleN//':'//routineN
 
-   IF (ASSOCIATED(distribution_2D)) THEN
-      distribution_2D%ref_count=distribution_2D%ref_count+1
+   IF (ASSOCIATED(distribution_2d)) THEN
+      distribution_2d%ref_count=distribution_2d%ref_count+1
    ENDIF
-END SUBROUTINE distribution_2D_retain
+END SUBROUTINE distribution_2d_retain
 
-!!****f* distribution_2D_types/distribution_2D_release [1.0] *
+!!****f* distribution_2d_types/distribution_2d_release [1.0] *
 !!
 !!   NAME
-!!     distribution_2D_release
+!!     distribution_2d_release
 !!
 !!   SYNOPSIS
 !!
@@ -191,35 +191,35 @@ END SUBROUTINE distribution_2D_retain
 !!   MODIFICATION HISTORY
 !!
 !!*** *********************************************************************
-SUBROUTINE distribution_2D_release(distribution_2D,error)
-   TYPE(distribution_2D_type), POINTER :: distribution_2D
+SUBROUTINE distribution_2d_release(distribution_2d,error)
+   TYPE(distribution_2d_type), POINTER :: distribution_2d
    TYPE(cp_error_type), OPTIONAL, INTENT(inout) :: error
 
-   CHARACTER(len=*), PARAMETER :: routineN='distribution_2D_release',&
+   CHARACTER(len=*), PARAMETER :: routineN='distribution_2d_release',&
                                   routineP=moduleN//':'//routineN
    LOGICAL :: failure
    INTEGER :: istat
 
-   IF (ASSOCIATED(distribution_2D)) THEN
+   IF (ASSOCIATED(distribution_2d)) THEN
       failure=.FALSE.
-      CPPrecondition(distribution_2D%ref_count>0,cp_failure_level,routineP,error,failure)
+      CPPrecondition(distribution_2d%ref_count>0,cp_failure_level,routineP,error,failure)
       IF (.NOT. failure ) THEN
-         distribution_2D%ref_count=distribution_2D%ref_count-1
-         IF (distribution_2D%ref_count == 0 ) THEN
-            CALL cp_blacs_env_release(distribution_2D%blacs_env)
-            DEALLOCATE(distribution_2D%col_distribution,stat=istat)
+         distribution_2d%ref_count=distribution_2d%ref_count-1
+         IF (distribution_2d%ref_count == 0 ) THEN
+            CALL cp_blacs_env_release(distribution_2d%blacs_env)
+            DEALLOCATE(distribution_2d%col_distribution,stat=istat)
             CPPostcondition(istat==0,cp_warning_level,routineP,error,failure)
-            DEALLOCATE(distribution_2D%row_distribution,stat=istat)
+            DEALLOCATE(distribution_2d%row_distribution,stat=istat)
             CPPostcondition(istat==0,cp_warning_level,routineP,error,failure)
-            DEALLOCATE(distribution_2D%local_rows,stat=istat)
+            DEALLOCATE(distribution_2d%local_rows,stat=istat)
             CPPostcondition(istat==0,cp_warning_level,routineP,error,failure)
-            DEALLOCATE(distribution_2D%local_cols,stat=istat)
+            DEALLOCATE(distribution_2d%local_cols,stat=istat)
             CPPostcondition(istat==0,cp_warning_level,routineP,error,failure)
-            DEALLOCATE(distribution_2D,stat=istat)
+            DEALLOCATE(distribution_2d,stat=istat)
             CPPostcondition(istat==0,cp_warning_level,routineP,error,failure)
          ENDIF
       ENDIF
    ENDIF
-END SUBROUTINE distribution_2D_release
+END SUBROUTINE distribution_2d_release
 
-END MODULE distribution_2D_types
+END MODULE distribution_2d_types
