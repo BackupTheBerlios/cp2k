@@ -480,7 +480,7 @@ contains
          routineP=moduleN//':'//routineN
     integer :: handle,output_unit
     logical :: ionode, failure,r_build
-    type(real_matrix_p_type), DIMENSION(:), pointer :: h
+    type(real_matrix_p_type), DIMENSION(:), pointer :: h,s
     type(dft_control_type), pointer :: dft_control
     type(atomic_kind_type), dimension(:), pointer :: atomic_kind_set
     failure=.false.
@@ -494,11 +494,13 @@ contains
     ionode = globenv%ionode
     output_unit = globenv%scr
 
-    call get_qs_env(qs_env=qs_env,&
-         h=h,&
-         dft_control=dft_control)
+    CALL get_qs_env(qs_env=qs_env,&
+                    dft_control=dft_control,&
+                    h=h,&
+                    s=s)
 
     CPPrecondition(associated(h),cp_failure_level,routineP,error,failure)
+    CPPrecondition(associated(s),cp_failure_level,routineP,error,failure)
     CPPrecondition(size(ks)>0,cp_failure_level,routineP,error,failure)
     CPPrecondition(size(p)>0,cp_failure_level,routineP,error,failure)
     CPPrecondition(size(p_old)>0,cp_failure_level,routineP,error,failure)
@@ -520,7 +522,8 @@ contains
           ks_env%s_struct_changed=.false.
        end if
 
-       call calculate_ecore(h(1)%matrix,p(1)%matrix,energy%core,globenv)
+       CALL calculate_ecore(h(1)%matrix,p(1)%matrix,s(1)%matrix,energy%core,&
+                            globenv)
 
        call calculate_rho_elec(p(1),p_old(1),r_build,ks_env%rho_rspace,&
             ks_env%rho_rspace_old,&
