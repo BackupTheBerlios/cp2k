@@ -5,10 +5,10 @@
 
 #include "cp_prep_globals.h"
 
-!!****h* cp2k/qs_build_ks_matrix [1.0] *
+!!****h* cp2k/qs_ks_methods [1.0] *
 !!
 !!   NAME
-!!     qs_build_ks_matrix
+!!     qs_ks_methods
 !!
 !!   FUNCTION
 !!     routines that build the Kohn-Sham matrix (i.e calculate the coulomb
@@ -29,7 +29,7 @@
 !!
 !!   SOURCE
 !****************************************************************************
-MODULE qs_build_ks_matrix
+MODULE qs_ks_methods
   USE atomic_kind_types,               ONLY: atomic_kind_type,&
                                              get_atomic_kind,&
                                              get_atomic_kind_set
@@ -136,7 +136,7 @@ MODULE qs_build_ks_matrix
   PRIVATE
 
   LOGICAL, PARAMETER :: debug_this_module=.TRUE.
-  CHARACTER(len=*), PARAMETER :: moduleN='qs_build_ks_matrix'
+  CHARACTER(len=*), PARAMETER :: moduleN='qs_ks_methods'
   INTEGER, SAVE, PRIVATE :: last_ks_id_nr=0
 
   PUBLIC :: qs_ks_create, qs_ks_did_change,&
@@ -145,7 +145,7 @@ MODULE qs_build_ks_matrix
 !****************************************************************************
 
 CONTAINS
-!!****f* qs_build_ks_matrix/qs_ks_create [1.0] *
+!!****f* qs_ks_methods/qs_ks_create [1.0] *
 !!
 !!   NAME
 !!     qs_ks_create
@@ -242,7 +242,7 @@ CONTAINS
   END SUBROUTINE qs_ks_create
 !***************************************************************************
 
-!!****f* qs_build_ks_matrix/qs_ks_build_kohn_sham_matrix [1.0] *
+!!****f* qs_ks_methods/qs_ks_build_kohn_sham_matrix [1.0] *
 !!
 !!   NAME
 !!     qs_ks_build_kohn_sham_matrix
@@ -275,7 +275,7 @@ CONTAINS
 !!     Matthias Krack
 !!
 !!   MODIFICATION HISTORY
-!!     06.2002 moved from qs_scf to qs_build_ks_matrix, use of ks_env
+!!     06.2002 moved from qs_scf to qs_ks_methods, use of ks_env
 !!             new did_change scheme [fawzi]
 !!     10.2002 introduced pools, uses updated rho as input, LSD [fawzi]
 !!
@@ -512,7 +512,7 @@ CONTAINS
   END SUBROUTINE qs_ks_build_kohn_sham_matrix
 ! *****************************************************************************
 
-!!****f* qs_build_ks_matrix/qs_ks_update_qs_env [1.0] *
+!!****f* qs_ks_methods/qs_ks_update_qs_env [1.0] *
 !!
 !!   NAME
 !!     qs_ks_update_qs_env
@@ -613,7 +613,7 @@ SUBROUTINE qs_ks_update_qs_env(ks_env,qs_env,&
 END SUBROUTINE qs_ks_update_qs_env
 !***************************************************************************
 
-!!****f* qs_build_ks_matrix/qs_ks_did_change [1.0] *
+!!****f* qs_ks_methods/qs_ks_did_change [1.0] *
 !!
 !!   NAME
 !!     qs_ks_did_change
@@ -686,7 +686,7 @@ SUBROUTINE qs_ks_did_change(ks_env,qs_env,s_mstruct_changed,&
 END SUBROUTINE qs_ks_did_change
 !***************************************************************************
 
-!!****f* qs_build_ks_matrix/calculate_xc_potential [1.0] *
+!!****f* qs_ks_methods/calculate_xc_potential [1.0] *
 !!
 !!   NAME
 !!     calculate_xc_potential
@@ -710,7 +710,7 @@ END SUBROUTINE qs_ks_did_change
 !!       instead of summed. 
 !!       This scales significantly better (e.g. factor 3 on 12 cpus
 !!       32 H2O) [Joost VdV]
-!!     - moved to qs_build_ks_matrix [fawzi]
+!!     - moved to qs_ks_methods [fawzi]
 !!
 !!*** *********************************************************************
   SUBROUTINE calculate_xc_potential(v_rspace_new,qs_env,error)
@@ -782,6 +782,6 @@ END SUBROUTINE qs_ks_did_change
 
 ! *****************************************************************************
 
-END MODULE qs_build_ks_matrix
+END MODULE qs_ks_methods
 
 ! *****************************************************************************
