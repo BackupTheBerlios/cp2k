@@ -168,7 +168,7 @@ CONTAINS
 
     CHARACTER(LEN=default_string_length)     :: line, title
     INTEGER                                  :: crd, ener, frc, handle, i, &
-                                                irep, natom, stat, ttst, vel
+                                                irep, natom, stat, ttst, vel, ndig, ndigl
     LOGICAL                                  :: explicit, failure, lval
     REAL(KIND=dp)                            :: f_ann
     REAL(KIND=dp), ALLOCATABLE, DIMENSION(:) :: ekin, temperatures
@@ -182,10 +182,11 @@ CONTAINS
     CALL timeset(routineN,"I","",handle)
     IF (.NOT.failure) THEN
        natom = SIZE(coords,1)
-       
+       ndig  = CEILING(LOG10(REAL(SIZE(coords,2)+1,KIND=dp)))
        CALL force_env_get(neb_env%force_env, cell=cell, error=error)
        DO irep = 1, SIZE(coords,2)
-          WRITE(line,'(A,I0)')"Replica_nr_",irep
+          ndigl = CEILING(LOG10(REAL(irep+1,KIND=dp)))
+          WRITE(line,'(A,'//cp_to_string(ndig)//'("0"),T'//cp_to_string(11+ndig+1-ndigl)//',I0)')"Replica_nr_",irep
           crd = cp_print_key_unit_nr(logger,neb_env%motion_print_section,"TRAJECTORY",&
                extension=".xyz",file_form="FORMATTED", middle_name="pos-"//TRIM(line), error=error)
           IF (PRESENT(vels)) THEN
