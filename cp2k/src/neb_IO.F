@@ -278,15 +278,15 @@ CONTAINS
           WRITE ( output_unit, '( A,T71,I10 )' )&
                ' NUMBER OF NEB REPLICA         =', &
                SIZE(coords,2)
-          WRITE ( output_unit, '( A,T33,4F12.6)' )&
-               ' DISTANCES BETWEEN REPLICA     =',distances(1:MIN(4,SIZE(distances)))
+          WRITE ( output_unit, '( A,T17,4F16.6)' )&
+               ' DISTANCES REP =',distances(1:MIN(4,SIZE(distances)))
           IF (SIZE(distances)>4) THEN
-             WRITE ( output_unit, '( T33,4F12.6)' )distances(5:SIZE(distances))
+             WRITE ( output_unit, '( T17,4F16.6)' )distances(5:SIZE(distances))
           END IF
-          WRITE ( output_unit, '( A,T33,4F12.6)' )&
-               ' REPLICA POTENTIAL ENERGY [au] =',energies(1:MIN(4,SIZE(energies)))
+          WRITE ( output_unit, '( A,T17,4F16.6)' )&
+               ' ENERGIES [au] =',energies(1:MIN(4,SIZE(energies)))
           IF (SIZE(energies)>4) THEN
-             WRITE ( output_unit, '( T33,4F12.6)' )energies(5:SIZE(energies))
+             WRITE ( output_unit, '( T17,4F16.6)' )energies(5:SIZE(energies))
           END IF
           IF (neb_env%opt_type==neb_md_opt) THEN
              WRITE ( output_unit, '( A,T33,4(1X,F11.5))' )&
@@ -310,7 +310,7 @@ CONTAINS
             extension=".ener",file_form="FORMATTED", error=error)
        IF (ener>0) THEN
           WRITE(line,'(I0)')2*SIZE(coords,2)-1
-          WRITE(ener,'(I10,'//TRIM(line)//'(1X,G12.6))')istep,&
+          WRITE(ener,'(I10,'//TRIM(line)//'(1X,F20.9))')istep,&
                energies, distances
        END IF
        CALL cp_print_key_finished_output(ener,logger,neb_env%neb_section,&
