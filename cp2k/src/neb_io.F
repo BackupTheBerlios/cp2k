@@ -28,7 +28,7 @@
 !!
 !!   SOURCE
 !****************************************************************************
-MODULE neb_IO
+MODULE neb_io
   USE cell_types,                      ONLY: cell_type
   USE cp2k_units,                      ONLY: get_cp2k_units,&
                                              unit_convert_type
@@ -364,4 +364,4 @@ CONTAINS
     END IF
   END SUBROUTINE dump_replica_coordinates
 
-END MODULE neb_IO
+END MODULE neb_io
