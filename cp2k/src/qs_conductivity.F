@@ -8,7 +8,7 @@
 !!   NAME
 !!     qs_conductivity
 !!   CVS id
-!!   $Id: qs_conductivity.F,v 1.16 2007/01/03 20:08:56 vondele Exp $
+!!   $Id: qs_conductivity.F,v 1.17 2007/12/05 12:36:37 vondele Exp $
 !!
 !!   FUNCTION
 !!
@@ -40,6 +40,7 @@ MODULE qs_conductivity
   USE termination,                     ONLY: stop_program
   USE timings,                         ONLY: timeset,&
                                              timestop
+  USE f77_blas
 #include "cp_common_uses.h"
 
   IMPLICIT NONE
