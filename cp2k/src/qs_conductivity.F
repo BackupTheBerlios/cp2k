@@ -1,6 +1,6 @@
 !-----------------------------------------------------------------------------!
 !   CP2K: A general program to perform molecular dynamics simulations         !
-!   Copyright (C) 2000 - 2007  CP2K developers group                          !
+!   Copyright (C) 2000 - 2008  CP2K developers group                          !
 !-----------------------------------------------------------------------------!
 
 !!****** cp2k/qs_conductivity [1.0] *
@@ -8,7 +8,7 @@
 !!   NAME
 !!     qs_conductivity
 !!   CVS id
-!!   $Id: qs_conductivity.F,v 1.18 2007/12/22 18:16:26 tlaino Exp $
+!!   $Id: qs_conductivity.F,v 1.19 2008/01/03 10:13:04 vondele Exp $
 !!
 !!   FUNCTION
 !!
